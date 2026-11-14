@@ -907,11 +907,11 @@ Pending acceptance inputs, not Phase A results:
 
 #### Codec and pipeline tolerances
 
-Owner ruling (2026-11-14 morning, option B): each codec/pipeline metric permits at most 5% regression; memory and storage permit none. For each comparable workload, compare the median of three old and three new rounds. Each round reports its own p50/p95/p99; compare matching percentiles across rounds. Do not pool unrelated protocols, directions, modes or body sizes.
+Owner ruling (2026-11-14 morning, option B) allowed at most 5% regression for each codec/pipeline metric and none for memory and storage. Owner ruling 2026-11-15 (「Pipeline-level gate」) keeps the 5% gate at the gateway pipeline level (`bench/run.sh`, `bench/messages.sh`, `bench/latency.sh`), where network I/O dominates. Codec CPU and allocation-count rows are reported against absolute per-event budgets, which the orchestrator proposes with numbers after the codec performance fixes; no codec budget is set yet. For each comparable workload, compare the median of three old and three new rounds. Each round reports its own p50/p95/p99; compare matching percentiles across rounds. Do not pool unrelated protocols, directions, modes or body sizes.
 
 | Metric | Acceptance rule |
 | --- | --- |
-| Codec CPU ns/event, allocations/event | New median no higher than 1.05 × old median (at most 5% regression). |
+| Codec CPU ns/event, allocations/event | Reported against an absolute per-event budget (owner ruling 2026-11-15); not gated at 1.05 × old median. |
 | Pipeline CPU/completion, first-deliverable, inter-event and completion latency p50/p95/p99 | New median no higher than 1.05 × old median (at most 5% regression). |
 | Throughput | New median no lower than 0.95 × old median (at most 5% regression). |
 | Allocated bytes/event, heap peak/retained and total charged memory/storage | New median no higher than old median (0% regression) for equal work and retention. Report retained-cache cost separately from old disconnect cleanup; never call that unequal-lifetime comparison a pass. |

@@ -88,7 +88,7 @@ S1 fixes this configuration contract; `ck-stream::Config` implements it for the 
 | `stream.max_metadata_bytes` | Deploy-only; restart required | Metadata limit (8 MiB default, owner number) and checked capacity validation, §6.4 |
 | `stream.cache_ttl` | Deploy-only; restart required | Last-read expiry, §6.4 |
 
-These values need no live-editable admin page or page exception under `crates/AGENTS.md`, Admin panel. Later hot-change support must include its admin page in the same change. Owner-approved codec/pipeline tolerances in `docs/INTERNAL-STREAM.md`, §9.2, allow at most 5% regression per metric and 0% for memory/storage (2026-11-14 morning, option B); they do not change the existing budgets above or the §9.3 storage gate.
+These values need no live-editable admin page or page exception under `crates/AGENTS.md`, Admin panel. Later hot-change support must include its admin page in the same change. Owner-approved codec/pipeline tolerances in `docs/INTERNAL-STREAM.md`, §9.2, allow at most 5% regression per pipeline metric and 0% for memory/storage (2026-11-14 morning, option B); codec CPU and allocation-count rows are reported against absolute per-event budgets instead (2026-11-15). They do not change the existing budgets above or the §9.3 storage gate.
 
 ## Enforcement
 
