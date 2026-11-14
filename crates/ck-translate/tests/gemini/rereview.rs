@@ -35,3 +35,25 @@ fn long_chat_tool_result_reaches_gemini() {
         json!({"name":"f","id":"a","response":{"result":text}})
     );
 }
+
+/// A native call id equal to the canonical id of an id-less call in the same candidate fails
+/// Chat egress visibly rather than giving two calls one id.
+#[test]
+fn native_and_canonical_call_ids_never_collide_in_chat() {
+    use super::final_review::gemini_to_chat;
+    let body = |parts: Value| json!({"candidates":[{"content":{"parts":parts},"finishReason":"STOP"}]});
+    let alone = gemini_to_chat(&body(json!([{"text":"x"},{"functionCall":{"name":"g","args":{}}}]))).unwrap();
+    let canonical = alone["choices"][0]["message"]["tool_calls"][0]["id"].clone();
+    for parts in [
+        json!([{"functionCall":{"id":canonical,"name":"f","args":{}}},{"functionCall":{"name":"g","args":{}}}]),
+        json!([{"text":"x"},{"functionCall":{"name":"g","args":{}}},{"functionCall":{"id":canonical,"name":"f","args":{}}}]),
+    ] {
+        let result = gemini_to_chat(&body(parts));
+        assert!(matches!(result, Err(codec::Error::Unsupported)), "{result:?}");
+    }
+    let distinct = json!([{"functionCall":{"id":"a","name":"f","args":{}}},{"functionCall":{"name":"g","args":{}}}]);
+    let out = gemini_to_chat(&body(distinct)).unwrap();
+    let calls = &out["choices"][0]["message"]["tool_calls"];
+    assert_eq!(calls[0]["id"], "a");
+    assert_ne!(calls[1]["id"], "a");
+}

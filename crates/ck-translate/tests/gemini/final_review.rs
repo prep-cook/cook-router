@@ -63,7 +63,7 @@ fn chat_tool_results_become_function_responses() {
 }
 
 /// Gemini body through Gemini ingress and buffered Chat egress.
-fn gemini_to_chat(body: &Value) -> codec::Result<Value> {
+pub(super) fn gemini_to_chat(body: &Value) -> codec::Result<Value> {
     let mut mapped = Mapped::new();
     let mut reader = mapped.store.reader(mapped.writer.id(), 0).unwrap();
     let mut ingress = gemini::response::Ingress::with_framing(

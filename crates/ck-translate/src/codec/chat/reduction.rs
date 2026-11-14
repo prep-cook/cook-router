@@ -3,7 +3,7 @@ use crate::codec::{
     Error, Result,
     document::{Document, Value},
     encode::{self, Encoder},
-    event::Kind,
+    event::{Kind, LocalId},
     table::Table,
 };
 use ck_stream::Writer;
@@ -16,6 +16,9 @@ struct Tool {
     index: u64,
     custom: bool,
     legacy: bool,
+    /// The projected call id when it is a local id, and whether it is the canonical one.
+    id: Option<LocalId>,
+    canonical: bool,
 }
 
 /// Native topology shared by delivery and reconciliation; payloads remain leased.
@@ -141,22 +144,34 @@ impl Reduction {
         }
         let custom = doc.string_is(doc.required(root, "arguments_format")?, "text")?;
         let legacy = doc.member(x, "chat_legacy")?.is_some();
+        let source = doc.required(x, "source")?;
+        // A provider call without its own id (Gemini) takes the canonical call id.
+        let (id, canonical) = match doc
+            .member(source, "ids")?
+            .map(|ids| doc.member(ids, "id"))
+            .transpose()?
+        {
+            Some(Some(id)) => (id, false),
+            _ => (doc.required(x, "tool_call_id")?, true),
+        };
+        // A provider id equal to another call's canonical id would make both calls ambiguous.
+        let local = local_id(doc, id)?;
+        if local.is_some()
+            && self
+                .tools
+                .iter()
+                .any(|tool| tool.choice == choice && tool.id == local && (canonical || tool.canonical))
+        {
+            return Err(Error::Unsupported);
+        }
         self.tools.push(Tool {
             choice,
             index,
             custom,
             legacy,
+            id: local,
+            canonical,
         })?;
-        let source = doc.required(x, "source")?;
-        // A provider call without its own id (Gemini) takes the canonical call id.
-        let id = match doc
-            .member(source, "ids")?
-            .map(|ids| doc.member(ids, "id"))
-            .transpose()?
-        {
-            Some(Some(id)) => id,
-            _ => doc.required(x, "tool_call_id")?,
-        };
         let name = doc.required(root, "name")?;
         mapped_document(owner, |e| {
             e.bytes(b"{")?;
@@ -326,4 +341,20 @@ fn chunk_base(doc: &Document, e: &mut Encoder<'_, '_>) -> Result<()> {
         }
     }
     e.bytes(b",\"object\":\"chat.completion.chunk\"")
+}
+/// String `node` as a local id, or `None` when it cannot be one (it then equals no canonical id).
+fn local_id(doc: &Document, node: usize) -> Result<Option<LocalId>> {
+    let mut bytes = [0u8; 64];
+    let mut len = 0;
+    let mut chars = doc.chars(node)?;
+    while let Some(c) = chars.next_scalar()? {
+        match bytes.get_mut(len) {
+            Some(slot) if c.is_ascii() => *slot = c as u8,
+            _ => return Ok(None),
+        }
+        len += 1;
+    }
+    Ok(std::str::from_utf8(&bytes[..len])
+        .ok()
+        .and_then(|s| LocalId::new(s).ok()))
 }
