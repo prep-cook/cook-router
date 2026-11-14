@@ -49,7 +49,13 @@ fn messages(view: RequestView<'_>) -> Result<()> {
                     }
                 }
                 // OpenAI sends a tool-call message's empty content as null.
-                Value::Null if doc.member(message, "tool_calls")?.is_some() => (),
+                Value::Null
+                    if doc.string_is(role, "assistant")?
+                        && doc
+                            .member(message, "tool_calls")?
+                            .map(|calls| doc.children(calls).map(|mut c| c.next().is_some()))
+                            .transpose()?
+                            .unwrap_or(false) => {}
                 _ => return Err(Error::Unsupported),
             }
         }

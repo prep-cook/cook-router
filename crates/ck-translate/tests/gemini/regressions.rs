@@ -296,6 +296,19 @@ fn null_content_beside_tool_calls_has_no_text_part() {
     );
 }
 
+/// Null content is allowed only on an assistant message that carries at least one call.
+#[test]
+fn null_content_needs_an_assistant_tool_call() {
+    let call = json!({"id":"a","type":"function","function":{"name":"f","arguments":"{}"}});
+    let user = json!({"model":"m","messages":[
+        {"role":"user","content":null,"tool_calls":[call]},
+        {"role":"tool","tool_call_id":"a","content":"done"}
+    ]});
+    assert!(matches!(validate(&user), Err(codec::Error::Unsupported)));
+    let empty = json!({"model":"m","messages":[{"role":"assistant","content":null,"tool_calls":[]}]});
+    assert!(matches!(validate(&empty), Err(codec::Error::Unsupported)));
+}
+
 /// An Anthropic tool result answers the preceding call with its text joined into
 /// `response.result`; an image in it is refused at the fence.
 #[test]
