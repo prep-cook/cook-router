@@ -70,6 +70,8 @@ pub(super) fn write_request(view: RequestView<'_>, streaming: bool, e: &mut Enco
 
 fn write_message(view: RequestView<'_>, message: usize, _message_index: u64, e: &mut Encoder<'_, '_>) -> Result<()> {
     let doc = view.document;
+    let claude = super::super::request_controls::from_claude(doc)?;
+    let mut reasoning = None;
     e.bytes(b"{")?;
     for (i, field) in doc.children(message)?.enumerate() {
         if i != 0 {
@@ -130,22 +132,56 @@ fn write_message(view: RequestView<'_>, message: usize, _message_index: u64, e: 
             doc.write_name(name, e)?;
             e.bytes(b":")?;
             if doc.name_is(name, "content")? && matches!(doc.node(field)?.value, Value::Array) {
-                e.bytes(b"[")?;
-                for (j, part) in doc.children(field)?.enumerate() {
-                    if j != 0 {
-                        e.bytes(b",")?;
-                    }
-                    write_part(view, part, e)?;
-                }
-                e.bytes(b"]")?;
+                write_content(view, field, claude, e)?;
+                reasoning = claude.then_some(field);
             } else {
                 super::super::request_controls::write(doc, field, e)?;
             }
         }
     }
+    if let Some(content) = reasoning {
+        write_reasoning(doc, content, e)?;
+    }
     super::super::request_controls::members(doc, message, &mut false, e)?;
     super::super::provenance::request_members(doc, message, None, &[], &[], e)?;
     e.bytes(b"}")
+}
+/// Writes a content array; for Claude history it leaves out thinking, which
+/// [`write_reasoning`] carries, and redacted blocks, which Chat cannot replay.
+fn write_content(view: RequestView<'_>, content: usize, claude: bool, e: &mut Encoder<'_, '_>) -> Result<()> {
+    let doc = view.document;
+    e.bytes(b"[")?;
+    let mut first = true;
+    for part in doc.children(content)? {
+        let kind = doc.required(part, "type")?;
+        if claude && (doc.string_is(kind, "reasoning")? || doc.string_is(kind, "redacted")?) {
+            continue;
+        }
+        if !first {
+            e.bytes(b",")?;
+        }
+        first = false;
+        write_part(view, part, e)?;
+    }
+    e.bytes(b"]")
+}
+/// Writes the visible thinking of Claude history as `reasoning_content`, blocks joined by a
+/// newline; signatures stay behind (owner ruling 2026-11-15).
+fn write_reasoning(doc: &Document, content: usize, e: &mut Encoder<'_, '_>) -> Result<()> {
+    let mut first = true;
+    for part in doc.children(content)? {
+        if !doc.string_is(doc.required(part, "type")?, "reasoning")? {
+            continue;
+        }
+        e.bytes(if first {
+            b",\"reasoning_content\":\"".as_slice()
+        } else {
+            b"\\n"
+        })?;
+        first = false;
+        doc.write_contents(doc.required(part, "text")?, e)?;
+    }
+    if first { Ok(()) } else { e.bytes(b"\"") }
 }
 fn write_function(doc: &Document, function: usize, custom: bool, e: &mut Encoder<'_, '_>) -> Result<()> {
     e.bytes(b"{")?;

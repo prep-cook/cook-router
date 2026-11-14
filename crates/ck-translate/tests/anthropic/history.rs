@@ -82,7 +82,7 @@ fn unlinked_forward_and_wrong_kind_server_results_fail_the_fence() {
             .unwrap();
         assert!(
             input
-                .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability)
+                .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability::default())
                 .is_err()
         );
         let raw = mapped.output(&mapped.writer);
@@ -106,7 +106,7 @@ fn assert_rejected(messages: Value) {
     input
         .advance(&mut mapped.writer, &serde_json::to_vec(&body).unwrap())
         .unwrap();
-    let result = input.finish(&mut mapped.writer, &anthropic::request::AnthropicCapability);
+    let result = input.finish(&mut mapped.writer, &anthropic::request::AnthropicCapability::default());
     assert!(matches!(result, Err(codec::Error::Schema)), "{messages}");
     let raw = mapped.output(&mapped.writer);
     assert_invalid_input(&raw, "client");
@@ -160,7 +160,7 @@ fn duplicate_chat_tool_call_ids_fail_the_anthropic_fence() {
     input
         .advance(&mut mapped.writer, &serde_json::to_vec(&body).unwrap())
         .unwrap();
-    let result = input.finish(&mut mapped.writer, &anthropic::request::AnthropicCapability);
+    let result = input.finish(&mut mapped.writer, &anthropic::request::AnthropicCapability::default());
     assert!(matches!(result, Err(codec::Error::Schema)));
     let error: Value = crate::events(&mapped.output(&mapped.writer)).pop().unwrap();
     assert_eq!(error["code"], "stream.invalid_input");

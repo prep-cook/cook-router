@@ -103,12 +103,13 @@ fn chat_stop_is_an_array_and_foreign_native_thinking_cannot_cross_fence() {
         ingress
             .advance(&mut mapped.writer, &serde_json::to_vec(&body).unwrap())
             .unwrap();
-        let result = ingress.finish(&mut mapped.writer, &anthropic::request::AnthropicCapability);
+        let result = ingress.finish(&mut mapped.writer, &anthropic::request::AnthropicCapability::default());
         if accepted {
             let ready = result.unwrap();
             let wire = anthropic::request::Egress {
                 destination: "anthropic",
                 upstream_stream: false,
+                default_max_tokens: None,
             }
             .encode(&ready, &mut mapped.writer)
             .unwrap();
@@ -437,7 +438,7 @@ fn undeclared_tool_choice_and_streamed_count_fail_the_request_schema() {
             .unwrap();
         assert!(
             ingress
-                .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability)
+                .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability::default())
                 .is_err(),
             "{body}"
         );

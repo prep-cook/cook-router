@@ -165,6 +165,7 @@ pub(super) fn declarations(doc: &mut Document, owner: &mut Writer) -> Result<()>
 
 pub(super) fn destination(doc: &Document) -> Result<()> {
     let x = doc.required(doc.root(), "x_ck")?;
+    let claude = from_claude(doc)?;
     for key in ["session", "provider_parameters"] {
         if let Some(value) = doc.member(x, key)?
             && doc.node(value)?.first.is_some()
@@ -178,7 +179,8 @@ pub(super) fn destination(doc: &Document) -> Result<()> {
                 Some((parent, _)) => attached(doc, parent)?,
                 None => true,
             };
-            if live {
+            // Request egress strips Claude signatures (owner ruling 2026-11-15).
+            if live && !(claude && doc.string_is(doc.required(entry, "kind")?, "anthropic")?) {
                 return Err(Error::Unsupported);
             }
         }
@@ -206,7 +208,7 @@ pub(super) fn destination(doc: &Document) -> Result<()> {
         {
             for part in doc.children(content)? {
                 let kind = doc.required(part, "type")?;
-                if doc.string_is(kind, "redacted")? || doc.string_is(kind, "encrypted")? {
+                if (doc.string_is(kind, "redacted")? && !claude) || doc.string_is(kind, "encrypted")? {
                     return Err(Error::Unsupported);
                 }
             }
@@ -220,6 +222,16 @@ pub(super) fn destination(doc: &Document) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether the request came from Anthropic ingress, whose thinking history Chat egress strips:
+/// visible thinking becomes `reasoning_content`; signatures and redacted blocks are dropped.
+pub(super) fn from_claude(doc: &Document) -> Result<bool> {
+    let x = doc.required(doc.root(), "x_ck")?;
+    match doc.member(x, "original_protocol")? {
+        Some(protocol) => doc.string_is(protocol, "anthropic"),
+        None => Ok(false),
+    }
 }
 
 pub(super) fn members(doc: &Document, parent: usize, first: &mut bool, e: &mut Encoder<'_, '_>) -> Result<()> {
