@@ -266,3 +266,27 @@ fn chat_usage_uses_chat_count_names_with_reasoning_and_cache_details() {
     }
 }
 
+#[test]
+fn gemini_usage_reports_candidates_with_or_without_thoughts() {
+    let thinking = run(
+        Source::Anthropic,
+        BodyMode::Buffered,
+        &fixture("b3_think_nonstream.json"),
+        Client::Gemini,
+        BodyMode::Buffered,
+    );
+    let usage = &serde_json::from_slice::<Value>(&thinking).unwrap()["usageMetadata"];
+    assert_eq!(usage["candidatesTokenCount"], 361 - 229, "{usage}");
+    assert_eq!(usage["thoughtsTokenCount"], 229, "{usage}");
+    let body = json!({"id":"m","model":"c","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}});
+    let plain = run(
+        Source::Anthropic,
+        BodyMode::Buffered,
+        &serde_json::to_vec(&body).unwrap(),
+        Client::Gemini,
+        BodyMode::Buffered,
+    );
+    let usage = &serde_json::from_slice::<Value>(&plain).unwrap()["usageMetadata"];
+    assert_eq!(usage["candidatesTokenCount"], 2, "{usage}");
+}
+
