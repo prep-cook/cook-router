@@ -176,3 +176,81 @@ fn claude_history_left_without_parts_reaches_chat_with_empty_text() {
     assert_eq!(tool["messages"][1]["content"], "");
     assert_eq!(tool["messages"][1]["tool_calls"][0]["id"], "c");
 }
+
+/// The OpenAI SDK's `max_completion_tokens` and `developer` prompt reach Anthropic as
+/// `max_tokens` and `system`; `max_tokens` wins when both limits are present.
+#[test]
+fn chat_completion_limit_and_developer_prompt_reach_anthropic() {
+    let input = json!({"model":"m","max_completion_tokens":64,"messages":[{"role":"developer","content":"Be brief."},{"role":"user","content":"q"}]});
+    let output = from_chat(&input, Some(AnthropicCapability::default())).unwrap();
+    assert_eq!(output["max_tokens"], 64);
+    assert_eq!(output["system"], "Be brief.");
+    assert_eq!(output["messages"], json!([{"role":"user","content":"q"}]));
+    assert!(output.get("max_completion_tokens").is_none(), "{output}");
+    // `max_tokens` comes first, so a second `max_tokens` from the other limit would win.
+    let both =
+        json!({"model":"m","max_tokens":7,"max_completion_tokens":64,"messages":[{"role":"user","content":"q"}]});
+    assert_eq!(
+        from_chat(&both, Some(AnthropicCapability::default())).unwrap()["max_tokens"],
+        7
+    );
+}
+
+/// Each `tool_result` becomes a Chat `tool` message with its text joined, before the rest of
+/// its user turn; `is_error` has no Chat field; an image in a result is refused.
+#[test]
+fn tool_result_reaches_chat_as_tool_messages() {
+    let request = |results: Value| {
+        json!({"model":"m","max_tokens":10,"tools":[{"name":"f","input_schema":{"type":"object"}}],"messages":[
+            {"role":"user","content":"q"},
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"a","name":"f","input":{}},
+                {"type":"tool_use","id":"b","name":"f","input":{}},
+            ]},
+            {"role":"user","content":results},
+        ]})
+    };
+    let output = anthropic_to_chat(&request(json!([
+        {"type":"tool_result","tool_use_id":"a","content":[{"type":"text","text":"22C"},{"type":"text","text":", rain"}]},
+        {"type":"tool_result","tool_use_id":"b","content":"failed","is_error":true},
+        {"type":"text","text":"and?"},
+    ])))
+    .unwrap();
+    assert_eq!(
+        output["messages"][2],
+        json!({"role":"tool","tool_call_id":"a","content":"22C, rain"})
+    );
+    assert_eq!(
+        output["messages"][3],
+        json!({"role":"tool","tool_call_id":"b","content":"failed"})
+    );
+    assert_eq!(
+        output["messages"][4],
+        json!({"role":"user","content":[{"type":"text","text":"and?"}]})
+    );
+    assert_eq!(output["messages"].as_array().unwrap().len(), 5);
+    let only = anthropic_to_chat(&request(json!([
+        {"type":"tool_result","tool_use_id":"a"},
+        {"type":"tool_result","tool_use_id":"b","content":"ok"},
+    ])))
+    .unwrap();
+    assert_eq!(
+        only["messages"][2],
+        json!({"role":"tool","tool_call_id":"a","content":""})
+    );
+    assert_eq!(only["messages"].as_array().unwrap().len(), 4);
+    let image = json!([{"type":"tool_result","tool_use_id":"a","content":[{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}]}]);
+    assert!(matches!(
+        anthropic_to_chat(&request(image)),
+        Err(codec::Error::Unsupported)
+    ));
+}
+
+/// Scenario C: the Anthropic `thinking` config has no Chat field; only the effort maps.
+#[test]
+fn thinking_config_does_not_reach_chat() {
+    let input = json!({"model":"m","max_tokens":2048,"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"high"},"messages":[{"role":"user","content":"q"}]});
+    let output = anthropic_to_chat(&input).unwrap();
+    assert!(output.get("reasoning").is_none(), "{output}");
+    assert_eq!(output["reasoning_effort"], "high");
+}

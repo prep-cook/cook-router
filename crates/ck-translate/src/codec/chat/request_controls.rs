@@ -227,9 +227,18 @@ pub(super) fn destination(doc: &Document) -> Result<()> {
 /// Whether the request came from Anthropic ingress, whose thinking history Chat egress strips:
 /// visible thinking becomes `reasoning_content`; signatures and redacted blocks are dropped.
 pub(super) fn from_claude(doc: &Document) -> Result<bool> {
+    original_protocol_is(doc, "anthropic")
+}
+
+/// Whether the request came from Chat ingress.
+pub(super) fn from_chat(doc: &Document) -> Result<bool> {
+    original_protocol_is(doc, "chat")
+}
+
+fn original_protocol_is(doc: &Document, protocol: &str) -> Result<bool> {
     let x = doc.required(doc.root(), "x_ck")?;
     match doc.member(x, "original_protocol")? {
-        Some(protocol) => doc.string_is(protocol, "anthropic"),
+        Some(original) => doc.string_is(original, protocol),
         None => Ok(false),
     }
 }

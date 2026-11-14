@@ -11,6 +11,8 @@ pub mod codec;
 mod final_review;
 #[path = "gemini/finish.rs"]
 mod finish;
+#[path = "gemini/foreign.rs"]
+mod foreign;
 #[path = "../src/gemini/boundary.rs"]
 pub mod gemini;
 #[path = "gemini/golden.rs"]

@@ -29,7 +29,8 @@ fn roles(view: RequestView<'_>, messages: usize, (index, hasher): (&CallIndex, &
     let mut system = false;
     for (ordinal, message) in doc.children(messages)?.enumerate() {
         let role = doc.required(message, "role")?;
-        if doc.string_is(role, "system")? {
+        // Encoding writes a leading `developer` message, such as Responses `instructions`, as `system`.
+        if doc.string_is(role, "system")? || doc.string_is(role, "developer")? {
             if conversation || system {
                 return Err(Error::Unsupported);
             }
@@ -58,10 +59,15 @@ fn parameters(doc: &Document, root: usize, operation: Operation, default_max_tok
     if !matches!(doc.node(messages)?.value, Value::Array) {
         return Err(Error::Schema);
     }
+    let completion = doc
+        .member(root, "max_completion_tokens")?
+        .map(|n| doc.unsigned(n))
+        .transpose()?;
     if operation == Operation::Generate {
+        // Encoding writes `max_completion_tokens` as `max_tokens` unless `max_tokens` is present.
         let max_tokens = match doc.member(root, "max_tokens")? {
             Some(max_tokens) => doc.unsigned(max_tokens)?,
-            None => default_max_tokens.ok_or(Error::Schema)?,
+            None => completion.or(default_max_tokens).ok_or(Error::Schema)?,
         };
         if max_tokens == 0 {
             return Err(Error::Schema);
@@ -94,7 +100,6 @@ fn parameters(doc: &Document, root: usize, operation: Operation, default_max_tok
     for key in [
         "n",
         "seed",
-        "max_completion_tokens",
         "logprobs",
         "top_logprobs",
         "modalities",

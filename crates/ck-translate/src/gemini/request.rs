@@ -172,14 +172,22 @@ fn normalize(owner: &mut Writer, doc: &mut Document, operation: Operation, model
     }
     if let Some(config) = doc.remove(root, "generationConfig")? {
         // A null config is unset in protobuf JSON: it maps nothing and returns as it came.
+        let members = doc.node(config)?.first.is_some();
         if !matches!(doc.node(config)?.value, Value::Null) {
             generation_config(doc, config, x)?;
         }
-        doc.append(native, config)?;
+        // Members without a canonical field stay native, and foreign fences refuse them; a
+        // config that mapping emptied is not native. A null or `{}` config returns as it came.
+        if !members || doc.node(config)?.first.is_some() {
+            doc.append(native, config)?;
+        }
     }
     messages(owner, doc)?;
     if let Some(tools) = doc.remove(root, "tools")? {
         normalize_tools(doc, tools, x)?;
+    }
+    if doc.node(native)?.first.is_none() {
+        doc.remove(x, "provider_parameters")?;
     }
     Ok(())
 }

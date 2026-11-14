@@ -221,6 +221,16 @@ fn thinking_config(doc: &Document, thinking: usize, e: &mut Encoder<'_, '_>) -> 
         e.bytes(b"\"thinkingBudget\":0")?;
     }
     let x = doc.required(doc.root(), "x_ck")?;
+    // A Chat `reasoning` object's effort means what `reasoning_effort` means.
+    if doc.member(thinking, "effort")?.is_none()
+        && super::is(doc, x, "original_protocol", "chat")?
+        && let Some(native) = doc.member(thinking, "native")?
+        && let Some(effort) = doc.member(native, "effort")?
+    {
+        comma(&mut first, e)?;
+        e.bytes(b"\"thinkingLevel\":")?;
+        doc.write(effort, e)?;
+    }
     if let Some(native) = doc.member(thinking, "native")?
         && super::is(doc, x, "original_protocol", "gemini")?
     {
