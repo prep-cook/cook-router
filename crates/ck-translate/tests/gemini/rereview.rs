@@ -167,3 +167,62 @@ fn create_time_updates_below_one_second_reach_egress() {
     let (_, canonical) = response(&sse(&rows), Framing::Sse, Framing::Json, Operation::Generate);
     assert!(!canonical.iter().any(|v| v["choices"] == json!([])), "{canonical:?}");
 }
+
+/// Gemini ingress of `body` into one client egress; the egress result of the first failing record.
+fn gemini_to<E: ResponseEgress>(
+    body: &Value,
+    egress: impl FnOnce(&mut ck_stream::Writer) -> E,
+) -> codec::Result<Vec<u8>> {
+    let mut mapped = Mapped::new();
+    let mut reader = mapped.store.reader(mapped.writer.id(), 0).unwrap();
+    let mut ingress = gemini::response::Ingress::with_framing(
+        &mut mapped.writer,
+        identity(Direction::Response),
+        Operation::Generate,
+        Framing::Json,
+        1 << 20,
+    )
+    .unwrap();
+    ingress
+        .advance(&mut mapped.writer, &serde_json::to_vec(body).unwrap())
+        .unwrap();
+    ingress.finish(&mut mapped.writer).unwrap();
+    let mut egress = egress(&mut mapped.writer);
+    let mut out = Vec::new();
+    while let Poll::Ready(Some(ck_stream::Read::Record(lease))) = reader.try_next() {
+        egress.advance(&mut mapped.writer, lease, |part| {
+            out.extend(bytes(&part));
+            Ok(())
+        })?;
+    }
+    egress.finish().map(|_| out)
+}
+
+/// A response part with media by URI fails at clients that cannot carry it, before any
+/// success; Gemini clients get it back unchanged.
+#[test]
+fn response_file_data_fails_where_it_cannot_be_written() {
+    let body = json!({"candidates":[{"index":0,"content":{"role":"model","parts":[
+        {"fileData":{"mimeType":"image/png","fileUri":"https://example.invalid/a.png"}}
+    ]},"finishReason":"STOP"}]});
+    let (out, _) = response(
+        &serde_json::to_vec(&body).unwrap(),
+        Framing::Json,
+        Framing::Json,
+        Operation::Generate,
+    );
+    assert_eq!(serde_json::from_slice::<Value>(&out).unwrap(), body);
+    let response = identity(Direction::Response);
+    let unsupported = |result: codec::Result<Vec<u8>>| matches!(result, Err(codec::Error::Unsupported));
+    for mode in [BodyMode::Buffered, BodyMode::Streaming] {
+        assert!(unsupported(gemini_to(&body, |w| {
+            codec::chat::egress::Egress::new(w, response, Operation::Generate, mode, true, |_| {}).unwrap()
+        })));
+        assert!(unsupported(gemini_to(&body, |w| {
+            anthropic::egress::Egress::new(w, response, Operation::Generate, mode, |_| {}).unwrap()
+        })));
+        assert!(unsupported(gemini_to(&body, |w| {
+            responses::egress::Egress::new(w, Operation::Generate, mode, |_, _| {}).unwrap()
+        })));
+    }
+}

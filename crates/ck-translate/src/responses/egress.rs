@@ -215,6 +215,7 @@ impl<F: FnMut(&'static str, u64)> codec::ResponseEgress for Egress<F> {
     ) -> Result<()> {
         crate::boundary::enter(self.owner, owner, self.terminal)?;
         let (kind, doc) = internal::decode(owner, input)?;
+        internal::refuse_uri_media(kind, &doc)?;
         self.process(owner, kind, doc, &mut output)
     }
     fn finish(&mut self) -> Result<()> {

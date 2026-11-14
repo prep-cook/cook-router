@@ -157,6 +157,33 @@ impl Frame {
     }
 }
 
+/// Refuses a Gemini part that carries media by URI (`fileData`) at a client egress that is not
+/// Gemini's: the canonical stream has no URI media record, and only Gemini egress restores the
+/// part from its originals.
+/// ponytail: a refusal rather than a URI media carrier; add one to INTERNAL-STREAM §3.3 to map
+/// such parts to other protocols.
+pub(crate) fn refuse_uri_media(kind: Kind, doc: &Document) -> Result<()> {
+    if kind != Kind::BlockStart {
+        return Ok(());
+    }
+    let x = doc.required(doc.root(), "x_ck")?;
+    for entry in doc
+        .member(x, "original")?
+        .map(|o| doc.children(o))
+        .transpose()?
+        .into_iter()
+        .flatten()
+    {
+        if let (Some(protocol), Some(pointer)) = (doc.member(entry, "protocol")?, doc.member(entry, "pointer")?)
+            && doc.string_is(protocol, "gemini")?
+            && doc.string_is(pointer, "/fileData")?
+        {
+            return Err(Error::Unsupported);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn next(owner: &mut Writer, reader: &mut ck_stream::Reader) -> Result<(Kind, Document)> {
     match reader.try_next() {
         std::task::Poll::Ready(Some(ck_stream::Read::Record(lease))) => decode(owner, lease),

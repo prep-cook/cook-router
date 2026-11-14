@@ -1,4 +1,6 @@
 // Test-only inclusion until the framework owner declares the production module.
+#[path = "../src/anthropic/mod.rs"]
+pub mod anthropic;
 // The Gemini codec leaves some shared helpers unused.
 #[allow(dead_code)]
 #[path = "../src/boundary.rs"]
@@ -23,6 +25,8 @@ mod quota;
 mod regressions;
 #[path = "gemini/rereview.rs"]
 mod rereview;
+#[path = "../src/responses/mod.rs"]
+pub mod responses;
 #[path = "gemini/roundtrip.rs"]
 mod roundtrip;
 #[path = "semantic/mod.rs"]
