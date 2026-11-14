@@ -37,29 +37,39 @@ pub struct Decoded<'a> {
 }
 impl<'a> Decoded<'a> {
     pub fn new(source: &'a Source, span: Span) -> Result<Self> {
-        if span.len() < 2
-            || !source.equals(
-                Span {
-                    start: span.start,
-                    end: span.start + 1,
-                },
-                b"\"",
-            )?
-            || !source.equals(
-                Span {
-                    start: span.end - 1,
-                    end: span.end,
-                },
-                b"\"",
-            )?
-        {
+        if span.len() < 2 {
+            return Err(Error::Json);
+        }
+        let inner = Span {
+            start: span.start + 1,
+            end: span.end - 1,
+        };
+        match source.slice(span)? {
+            Some([b'"', quoted @ .., b'"']) => {
+                return Ok(Self {
+                    cursor: source.cursor_from(inner, quoted)?,
+                });
+            }
+            Some(_) => return Err(Error::Json),
+            None => {}
+        }
+        if !source.equals(
+            Span {
+                start: span.start,
+                end: span.start + 1,
+            },
+            b"\"",
+        )? || !source.equals(
+            Span {
+                start: span.end - 1,
+                end: span.end,
+            },
+            b"\"",
+        )? {
             return Err(Error::Json);
         }
         Ok(Self {
-            cursor: source.cursor(Span {
-                start: span.start + 1,
-                end: span.end - 1,
-            })?,
+            cursor: source.cursor(inner)?,
         })
     }
 

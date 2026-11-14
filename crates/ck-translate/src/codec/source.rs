@@ -1,8 +1,12 @@
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ck_stream::{ByteSpan, FRAME_BYTES, Lease, MetadataPermit, Position, ScratchLease, ScratchReservation, Writer};
 
 use super::{Error, Result};
+
+#[cfg(test)]
+mod tests;
 
 /// Byte offsets into one `Source`, not pointers into the mmap mapping.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -59,6 +63,8 @@ pub struct Source {
     len: u64,
     metadata: MetadataPermit,
     base: u64,
+    /// Index of the segment read last. Release moves indexes, so it resets this hint.
+    recent: Cell<usize>,
 }
 
 impl Source {
@@ -69,6 +75,7 @@ impl Source {
             len: 0,
             metadata: owner.reserve_metadata(0)?,
             base: 0,
+            recent: Cell::new(0),
         })
     }
 
@@ -205,6 +212,7 @@ impl Source {
         }
         let count = self.segments.partition_point(|segment| segment.end <= offset);
         self.segments.drain(..count);
+        self.recent.set(0);
         self.base = self.segments.first().map_or(self.len, |segment| segment.start);
         Ok(())
     }
@@ -217,6 +225,7 @@ impl Source {
         }
         self.segments
             .retain(|segment| segment.start < span.start || segment.end > span.end);
+        self.recent.set(0);
         self.base = self.segments.first().map_or(self.len, |segment| segment.start);
         Ok(())
     }
@@ -240,16 +249,41 @@ impl Source {
     }
 
     pub fn cursor(&self, span: Span) -> Result<Cursor<'_>> {
-        self.check_live()?;
-        if span.start < self.base || span.start > span.end || span.end > self.len {
-            return Err(Error::Position);
-        }
+        self.check_span(span)?;
         Ok(Cursor {
             source: self,
             offset: span.start,
             end: span.end,
             chunk: &[],
         })
+    }
+
+    /// A cursor over `span` whose first chunk is `bytes`, which `slice` returned for `span`.
+    pub(crate) fn cursor_from<'a>(&'a self, span: Span, bytes: &'a [u8]) -> Result<Cursor<'a>> {
+        debug_assert_eq!(bytes.len() as u64, span.len());
+        let mut cursor = self.cursor(span)?;
+        cursor.chunk = bytes;
+        Ok(cursor)
+    }
+
+    /// Borrow `span` when one segment frame holds all of it, or `None` when it crosses a
+    /// segment or frame boundary; contiguity depends on both ends, not the length. Empty
+    /// spans borrow nothing. Invalidation and invalid coordinates remain errors.
+    pub fn slice(&self, span: Span) -> Result<Option<&[u8]>> {
+        self.check_span(span)?;
+        if span.is_empty() {
+            return Ok(Some(&[]));
+        }
+        let bytes = self.chunk(span.start, span.end)?;
+        Ok((bytes.len() as u64 == span.len()).then_some(bytes))
+    }
+
+    fn check_span(&self, span: Span) -> Result<()> {
+        self.check_live()?;
+        if span.start < self.base || span.start > span.end || span.end > self.len {
+            return Err(Error::Position);
+        }
+        Ok(())
     }
 
     pub fn visit(&self, span: Span, mut visit: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
@@ -266,6 +300,9 @@ impl Source {
         if span.len() != bytes.len() as u64 {
             return Ok(false);
         }
+        if let Some(slice) = self.slice(span)? {
+            return Ok(slice == bytes);
+        }
         let mut cursor = self.cursor(span)?;
         for &byte in bytes {
             if cursor.next_byte()? != Some(byte) {
@@ -276,24 +313,30 @@ impl Source {
     }
 
     fn chunk(&self, offset: u64, end: u64) -> Result<&[u8]> {
-        let index = self
-            .segments
-            .partition_point(|segment| segment.start <= offset)
-            .checked_sub(1)
-            .ok_or(Error::Position)?;
+        let index = match self.segments.get(self.recent.get()) {
+            Some(segment) if segment.start <= offset && offset < segment.end => self.recent.get(),
+            _ => {
+                let index = self
+                    .segments
+                    .partition_point(|segment| segment.start <= offset)
+                    .checked_sub(1)
+                    .ok_or(Error::Position)?;
+                self.recent.set(index);
+                index
+            }
+        };
         let segment = &self.segments[index];
         if offset >= segment.end {
             return Err(Error::Position);
         }
         let bytes = match &segment.storage {
-            Storage::Canonical { span, lease } => {
-                let position = advance(span.start, offset - segment.start)?;
-                ByteSpan::new(lease, span.clone())?.chunk(position)?
-            }
+            // `push` checked the span's generation and containment; `Lease::chunk` checks
+            // liveness and the record bounds again for this borrow.
+            Storage::Canonical { span, lease } => lease.chunk(advance(span.start, offset - segment.start)?)?,
             Storage::Scratch(lease) => lease.chunk((offset - segment.start) as usize)?,
             Storage::Pending(reservation) => reservation.chunk((offset - segment.start) as usize)?,
         };
-        Ok(&bytes[..bytes.len().min((end - offset) as usize)])
+        Ok(&bytes[..bytes.len().min((end.min(segment.end) - offset) as usize)])
     }
 }
 
