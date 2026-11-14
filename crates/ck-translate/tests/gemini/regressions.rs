@@ -255,3 +255,103 @@ fn system_role_in_contents_is_refused() {
     let raw = String::from_utf8(mapped.output(&mapped.writer)).unwrap();
     assert!(!raw.contains("event: x_ck.request.end"));
 }
+
+/// Encodes an Anthropic request for Gemini; a fence refusal is the error.
+fn anthropic_to_gemini(input: &Value) -> codec::Result<Value> {
+    let mut mapped = Mapped::new();
+    let mut ingress = anthropic::request::Ingress::new(
+        &mut mapped.writer,
+        &mapped.store,
+        identity(Direction::Request),
+        Operation::Generate,
+        1024 * 1024,
+    )
+    .unwrap();
+    ingress
+        .advance(&mut mapped.writer, &serde_json::to_vec(input).unwrap())
+        .unwrap();
+    let ready = ingress.finish(&mut mapped.writer, &gemini::request::GeminiCapability)?;
+    let output = gemini::request::Egress {
+        destination: "gemini",
+        upstream_stream: true,
+    }
+    .encode(&ready, &mut mapped.writer)
+    .unwrap();
+    Ok(serde_json::from_slice(&bytes(&output)).unwrap())
+}
+
+/// OpenAI sends a tool-call message's content as null; it becomes a turn of only function calls.
+#[test]
+fn null_content_beside_tool_calls_has_no_text_part() {
+    let out = chat_to_gemini(
+        br#"{"model":"m","messages":[{"role":"user","content":"weather?"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Taipei\"}"}}]},{"role":"tool","tool_call_id":"call_1","content":"22C"}]}"#,
+    );
+    assert_eq!(
+        out["contents"][1],
+        json!({"role":"model","parts":[{"functionCall":{"name":"get_weather","id":"call_1","args":{"city":"Taipei"}}}]})
+    );
+    assert_eq!(
+        out["contents"][2],
+        json!({"role":"user","parts":[{"functionResponse":{"name":"get_weather","id":"call_1","response":{"result":"22C"}}}]})
+    );
+}
+
+/// Null content is allowed only on an assistant message that carries at least one call.
+#[test]
+fn null_content_needs_an_assistant_tool_call() {
+    let call = json!({"id":"a","type":"function","function":{"name":"f","arguments":"{}"}});
+    let user = json!({"model":"m","messages":[
+        {"role":"user","content":null,"tool_calls":[call]},
+        {"role":"tool","tool_call_id":"a","content":"done"}
+    ]});
+    assert!(matches!(validate(&user), Err(codec::Error::Unsupported)));
+    let empty = json!({"model":"m","messages":[{"role":"assistant","content":null,"tool_calls":[]}]});
+    assert!(matches!(validate(&empty), Err(codec::Error::Unsupported)));
+}
+
+/// An Anthropic tool result answers the preceding call with its text joined into
+/// `response.result`; an image in it is refused at the fence.
+#[test]
+fn anthropic_tool_result_becomes_a_function_response() {
+    let request = |content: Value| {
+        json!({"model":"m","max_tokens":10,"messages":[
+            {"role":"user","content":"weather?"},
+            {"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"get_weather","input":{"city":"Taipei"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":content}]}
+        ]})
+    };
+    let out = anthropic_to_gemini(&request(
+        json!([{"type":"text","text":"22C"},{"type":"text","text":", rain"}]),
+    ))
+    .unwrap();
+    assert_eq!(
+        out["contents"][2],
+        json!({"role":"user","parts":[{"functionResponse":{"name":"get_weather","id":"toolu_01","response":{"result":"22C, rain"}}}]})
+    );
+    let image = json!([{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}]);
+    assert!(matches!(
+        anthropic_to_gemini(&request(image)),
+        Err(codec::Error::Unsupported)
+    ));
+}
+
+/// Another protocol's native thinking object is not a Gemini `thinkingConfig`; only the
+/// canonical budget and switch map.
+#[test]
+fn foreign_native_thinking_maps_only_canonical_fields() {
+    let config = |thinking: Value| {
+        let input =
+            json!({"model":"m","max_tokens":1024,"thinking":thinking,"messages":[{"role":"user","content":"hi"}]});
+        anthropic_to_gemini(&input).unwrap()["generationConfig"]["thinkingConfig"].clone()
+    };
+    assert_eq!(
+        config(json!({"type":"enabled","budget_tokens":512})),
+        json!({"thinkingBudget":512})
+    );
+    assert_eq!(config(json!({"type":"disabled"})), json!({"thinkingBudget":0}));
+    let chat = chat_to_gemini(br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low","reasoning":{"effort":"low"}}"#);
+    assert_eq!(
+        chat["generationConfig"]["thinkingConfig"],
+        json!({"thinkingLevel":"low"})
+    );
+}

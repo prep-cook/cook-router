@@ -39,10 +39,12 @@ pub(super) fn write(view: RequestView<'_>, e: &mut Encoder<'_, '_>) -> Result<()
             } else {
                 b"{\"role\":\"user\",\"parts\":["
             })?;
+            e.bytes(b"{")?;
             function_result(doc, message, calls.ok_or(Error::Schema)?, e)?;
+            e.bytes(b"}")?;
         } else {
+            write_message(view, message, false, calls, e)?;
             calls = doc.member(message, "tool_calls")?;
-            write_message(view, message, false, e)?;
         }
         results = tool;
     }
@@ -50,7 +52,7 @@ pub(super) fn write(view: RequestView<'_>, e: &mut Encoder<'_, '_>) -> Result<()
     for message in doc.children(messages)? {
         if super::is(doc, message, "role", "system")? {
             e.bytes(b",\"systemInstruction\":")?;
-            write_message(view, message, true, e)?;
+            write_message(view, message, true, None, e)?;
         }
     }
     let native = super::request_schema::native(doc)?;
@@ -193,7 +195,8 @@ fn modalities(doc: &Document, list: usize, e: &mut Encoder<'_, '_>) -> Result<()
     }
     e.bytes(b"]")
 }
-/// Writes `"thinkingConfig":{...}` from the mapped controls and the native thinking config.
+/// Writes `"thinkingConfig":{...}` from the mapped controls and, for a Gemini source, the native
+/// thinking config; another protocol's native members are not Gemini fields.
 fn thinking_config(doc: &Document, thinking: usize, e: &mut Encoder<'_, '_>) -> Result<()> {
     e.bytes(b"\"thinkingConfig\":{")?;
     let mut first = true;
@@ -209,7 +212,18 @@ fn thinking_config(doc: &Document, thinking: usize, e: &mut Encoder<'_, '_>) -> 
             doc.write(n, e)?;
         }
     }
-    if let Some(native) = doc.member(thinking, "native")? {
+    let disabled = match doc.member(thinking, "enabled")? {
+        Some(n) => matches!(doc.node(n)?.value, Value::Bool(false)),
+        None => false,
+    };
+    if disabled && doc.member(thinking, "budget_tokens")?.is_none() {
+        comma(&mut first, e)?;
+        e.bytes(b"\"thinkingBudget\":0")?;
+    }
+    let x = doc.required(doc.root(), "x_ck")?;
+    if let Some(native) = doc.member(thinking, "native")?
+        && super::is(doc, x, "original_protocol", "gemini")?
+    {
         for n in doc.children(native)? {
             comma(&mut first, e)?;
             doc.write_name(doc.node(n)?.name.ok_or(Error::Schema)?, e)?;
@@ -274,7 +288,14 @@ fn comma(first: &mut bool, e: &mut Encoder<'_, '_>) -> Result<()> {
     *first = false;
     Ok(())
 }
-fn write_message(view: RequestView<'_>, message: usize, system: bool, e: &mut Encoder<'_, '_>) -> Result<()> {
+/// Writes a content turn; `previous` holds the tool calls its tool results answer.
+fn write_message(
+    view: RequestView<'_>,
+    message: usize,
+    system: bool,
+    previous: Option<usize>,
+    e: &mut Encoder<'_, '_>,
+) -> Result<()> {
     let doc = view.document;
     e.bytes(b"{")?;
     // The source spelling wins: a recorded null role was absent.
@@ -296,7 +317,11 @@ fn write_message(view: RequestView<'_>, message: usize, system: bool, e: &mut En
     }
     e.bytes(b"\"parts\":[")?;
     let mut first = true;
-    let content = doc.member(message, "content")?;
+    // A null content beside tool calls carries no text.
+    let content = match doc.member(message, "content")? {
+        Some(n) if matches!(doc.node(n)?.value, Value::Null) => None,
+        content => content,
+    };
     let calls = doc.member(message, "tool_calls")?;
     let order = super::origin(doc, message, "parts")?;
     if let Some(order) = order {
@@ -306,7 +331,7 @@ fn write_message(view: RequestView<'_>, message: usize, system: bool, e: &mut En
                 continue;
             }
             comma(&mut first, e)?;
-            write_part(view, part, Some(entry), e)?;
+            write_part(view, part, Some(entry), previous, e)?;
         }
     }
     if let Some(content) = content {
@@ -316,7 +341,7 @@ fn write_message(view: RequestView<'_>, message: usize, system: bool, e: &mut En
                     continue;
                 }
                 comma(&mut first, e)?;
-                write_part(view, part, None, e)?;
+                write_part(view, part, None, previous, e)?;
             }
         } else {
             comma(&mut first, e)?;
@@ -331,14 +356,20 @@ fn write_message(view: RequestView<'_>, message: usize, system: bool, e: &mut En
                 continue;
             }
             comma(&mut first, e)?;
-            write_part(view, call, None, e)?;
+            write_part(view, call, None, previous, e)?;
         }
     }
     e.bytes(b"]")?;
     originals(doc, message, None, e)?;
     e.bytes(b"}")
 }
-fn write_part(view: RequestView<'_>, part: usize, order: Option<usize>, e: &mut Encoder<'_, '_>) -> Result<()> {
+fn write_part(
+    view: RequestView<'_>,
+    part: usize,
+    order: Option<usize>,
+    calls: Option<usize>,
+    e: &mut Encoder<'_, '_>,
+) -> Result<()> {
     let doc = view.document;
     let kind = doc.required(part, "type")?;
     let flag = |name| -> Result<bool> { Ok(order.map(|n| doc.member(n, name)).transpose()?.flatten().is_some()) };
@@ -347,7 +378,7 @@ fn write_part(view: RequestView<'_>, part: usize, order: Option<usize>, e: &mut 
     if doc.string_is(kind, "function")? {
         function_call(doc, part, flag("synthetic_id")?, e)?;
     } else if doc.string_is(kind, "tool_result")? {
-        function_response(doc, part, flag("synthetic_id")?, e)?;
+        function_response(doc, part, calls, flag("synthetic_id")?, e)?;
     } else if doc.string_is(kind, "text")? || doc.string_is(kind, "reasoning")? {
         first = flag("signature_only")?;
         if !first {
@@ -414,10 +445,19 @@ fn function_call(doc: &Document, part: usize, synthetic_id: bool, e: &mut Encode
     super::members(doc, function, &["name", "arguments"], e)?;
     e.bytes(b"}")
 }
-/// Writes `"functionResponse":{...}`; a linked id the source omitted stays omitted.
-fn function_response(doc: &Document, part: usize, synthetic_id: bool, e: &mut Encoder<'_, '_>) -> Result<()> {
+/// Writes `"functionResponse":{...}`; a linked id the source omitted stays omitted. A tool result
+/// from another protocol has no `result` and answers one of `calls` like a Chat tool message.
+fn function_response(
+    doc: &Document,
+    part: usize,
+    calls: Option<usize>,
+    synthetic_id: bool,
+    e: &mut Encoder<'_, '_>,
+) -> Result<()> {
+    let Some(result) = doc.member(part, "result")? else {
+        return function_result(doc, part, calls.ok_or(Error::Schema)?, e);
+    };
     e.bytes(b"\"functionResponse\":{\"name\":")?;
-    let result = doc.required(part, "result")?;
     doc.write(doc.required(result, "name")?, e)?;
     if !synthetic_id {
         e.bytes(b",\"id\":")?;
@@ -426,8 +466,8 @@ fn function_response(doc: &Document, part: usize, synthetic_id: bool, e: &mut En
     super::members(doc, result, &["name"], e)?;
     e.bytes(b"}")
 }
-/// Writes a Chat tool message as a `functionResponse` part: the name of the call it answers,
-/// its id and its text as `response.result`.
+/// Writes a Chat tool message or a canonical tool result as `"functionResponse":{...}`: the name
+/// of the call it answers, its id and its text as `response.result`.
 fn function_result(doc: &Document, message: usize, calls: usize, e: &mut Encoder<'_, '_>) -> Result<()> {
     let id = doc.required(message, "tool_call_id")?;
     let mut name = None;
@@ -436,7 +476,7 @@ fn function_result(doc: &Document, message: usize, calls: usize, e: &mut Encoder
             name = Some(doc.required(doc.required(call, "function")?, "name")?);
         }
     }
-    e.bytes(b"{\"functionResponse\":{\"name\":")?;
+    e.bytes(b"\"functionResponse\":{\"name\":")?;
     doc.write(name.ok_or(Error::Schema)?, e)?;
     e.bytes(b",\"id\":")?;
     doc.write(id, e)?;
@@ -455,7 +495,7 @@ fn function_result(doc: &Document, message: usize, calls: usize, e: &mut Encoder
         Some(content) => doc.write(content, e)?,
         None => e.bytes(b"\"\"")?,
     }
-    e.bytes(b"}}}")
+    e.bytes(b"}}")
 }
 /// Writes `"inlineData":{...}` from a registered payload or `"fileData":{...}` from a URI.
 fn media(view: RequestView<'_>, part: usize, e: &mut Encoder<'_, '_>) -> Result<()> {
