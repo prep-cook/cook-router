@@ -479,38 +479,70 @@ fn merged(
     parent: usize,
     skip: &[&str],
 ) -> Result<Document> {
+    mapped(owner, |e| {
+        e.bytes(b"{")?;
+        merge(old.map(|old| (old, old.root())), doc, parent, skip, true, e)?;
+        e.bytes(b"}")
+    })
+}
+/// Writes the members of `old` that `parent` does not replace, then those of `parent` not named
+/// in `skip`. With `nested`, a candidate `content` object in both merges its members the same way.
+fn merge(
+    old: Option<(&Document, usize)>,
+    doc: &Document,
+    parent: usize,
+    skip: &[&str],
+    nested: bool,
+    e: &mut Encoder<'_, '_>,
+) -> Result<()> {
     let skipped = |name| {
         skip.iter()
             .try_fold(false, |found, key| Ok::<_, Error>(found || doc.name_is(name, key)?))
     };
-    mapped(owner, |e| {
-        e.bytes(b"{")?;
-        let mut first = true;
-        for node in old
-            .map(|old| old.children(old.root()))
-            .transpose()?
-            .into_iter()
-            .flatten()
-        {
-            let old = old.ok_or(Error::Schema)?;
-            let name = old.node(node)?.name.ok_or(Error::Schema)?;
-            let mut replaced = false;
-            for other in doc.children(parent)? {
-                let other = doc.node(other)?.name.ok_or(Error::Schema)?;
-                replaced = replaced || (!skipped(other)? && same_name(old, name, doc, other)?);
-            }
-            if !replaced {
-                if !std::mem::replace(&mut first, false) {
-                    e.bytes(b",")?;
-                }
-                old.write_name(name, e)?;
-                e.bytes(b":")?;
-                old.write(node, e)?;
-            }
+    let mut first = true;
+    let mut content = None;
+    for node in old.map(|(o, n)| o.children(n)).transpose()?.into_iter().flatten() {
+        let (old, _) = old.ok_or(Error::Schema)?;
+        let name = old.node(node)?.name.ok_or(Error::Schema)?;
+        let mut replaced = false;
+        for other in doc.children(parent)? {
+            let other = doc.node(other)?.name.ok_or(Error::Schema)?;
+            replaced = replaced || (!skipped(other)? && same_name(old, name, doc, other)?);
         }
-        fields(doc, parent, skip, &mut first, e)?;
-        e.bytes(b"}")
-    })
+        if replaced && nested && old.name_is(name, "content")? && matches!(old.node(node)?.value, Value::Object) {
+            content = Some((old, node));
+        } else if !replaced {
+            comma(&mut first, e)?;
+            old.write_name(name, e)?;
+            e.bytes(b":")?;
+            old.write(node, e)?;
+        }
+    }
+    for node in doc.children(parent)? {
+        let name = doc.node(node)?.name.ok_or(Error::Schema)?;
+        if skipped(name)? {
+            continue;
+        }
+        comma(&mut first, e)?;
+        doc.write_name(name, e)?;
+        e.bytes(b":")?;
+        match content {
+            Some(old) if doc.name_is(name, "content")? && matches!(doc.node(node)?.value, Value::Object) => {
+                e.bytes(b"{")?;
+                merge(Some(old), doc, node, &[], false, e)?;
+                e.bytes(b"}")?;
+            }
+            _ => doc.write(node, e)?,
+        }
+    }
+    Ok(())
+}
+fn comma(first: &mut bool, e: &mut Encoder<'_, '_>) -> Result<()> {
+    if std::mem::replace(first, false) {
+        Ok(())
+    } else {
+        e.bytes(b",")
+    }
 }
 fn same_name(a: &Document, x: Name, b: &Document, y: Name) -> Result<bool> {
     let (mut left, mut right) = (a.name_chars(x)?, b.name_chars(y)?);

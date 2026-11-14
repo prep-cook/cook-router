@@ -65,7 +65,9 @@ fn held_parts_keep_their_place_around_native_events() {
     let text = |t: &str| json!({"candidates":[{"content":{"parts":[{"text":t}]}}]});
     let mut wire = sse(&[text("before")]);
     wire.extend(b"event: future_event\ndata: marker\n\n");
-    wire.extend(sse(&[json!({"candidates":[{"content":{"parts":[{"text":"after"}]},"finishReason":"STOP"}]})]));
+    wire.extend(sse(&[
+        json!({"candidates":[{"content":{"parts":[{"text":"after"}]},"finishReason":"STOP"}]}),
+    ]));
     let (out, _) = response(&wire, Framing::Sse, Framing::Sse, Operation::Generate);
     let raw = String::from_utf8(out).unwrap();
     let at = |needle: &str| raw.find(needle).unwrap_or_else(|| panic!("{needle} missing: {raw}"));
@@ -76,7 +78,10 @@ fn held_parts_keep_their_place_around_native_events() {
     let wire = format!("id: ev1\nretry: 1500\nevent: message\ndata: {body}\n\n");
     let (out, _) = response(wire.as_bytes(), Framing::Sse, Framing::Sse, Operation::Generate);
     let raw = String::from_utf8(out.clone()).unwrap();
-    assert!(raw.starts_with("id: ev1\nretry: 1500\nevent: message\ndata: {"), "{raw}");
+    assert!(
+        raw.starts_with("id: ev1\nretry: 1500\nevent: message\ndata: {"),
+        "{raw}"
+    );
     assert!(raw.ends_with("\n\n") && raw.matches("id: ev1").count() == 1, "{raw}");
     let rows = events(&out);
     assert_eq!(rows[0]["candidates"][0]["content"]["parts"][0]["text"], "a", "{raw}");
@@ -92,7 +97,8 @@ fn held_parts_keep_their_place_around_native_events() {
 fn null_stop_stays_unset() {
     let input = json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"stopSequences":null}});
     assert_eq!(request(&input, Operation::Generate).0, input);
-    let out = super::regressions::chat_to_gemini(br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"stop":null}"#);
+    let out =
+        super::regressions::chat_to_gemini(br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"stop":null}"#);
     let stop = &out["generationConfig"]["stopSequences"];
     assert!(stop.is_null(), "{out}");
 }
@@ -105,5 +111,27 @@ fn call_part_members_named_like_canonical_ones_survive() {
         part.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         let input = json!({"contents":[{"role":"model","parts":[part]}]});
         assert_eq!(request(&input, Operation::Generate).0, input);
+    }
+}
+
+/// Streamed content extras from several chunks merge, as they do in buffered output.
+#[test]
+fn streamed_content_extras_merge() {
+    let rows = [
+        json!({"candidates":[{"content":{"parts":[{"text":"hi"}],"futureA":17}}]}),
+        json!({"candidates":[{"content":{"futureB":18},"finishReason":"STOP"}]}),
+    ];
+    for downstream in [Framing::Sse, Framing::Json] {
+        let (out, _) = response(&sse(&rows), Framing::Sse, downstream, Operation::Generate);
+        let last = match downstream {
+            Framing::Sse => events(&out).pop().unwrap(),
+            _ => serde_json::from_slice(&out).unwrap(),
+        };
+        let content = &last["candidates"][0]["content"];
+        assert_eq!(
+            (&content["futureA"], &content["futureB"]),
+            (&json!(17), &json!(18)),
+            "{last}"
+        );
     }
 }
