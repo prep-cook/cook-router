@@ -32,7 +32,6 @@ fn messages(view: RequestView<'_>) -> Result<()> {
             tool_message(doc, message, calls)?;
             continue;
         }
-        calls = doc.member(message, "tool_calls")?;
         if doc.string_is(role, "system")? {
             if system {
                 return Err(Error::Unsupported);
@@ -46,9 +45,11 @@ fn messages(view: RequestView<'_>) -> Result<()> {
                 Value::String(_) | Value::Text(_) | Value::Fragments | Value::Utf8Media => (),
                 Value::Array => {
                     for part in doc.children(content)? {
-                        validate_part(view, part)?;
+                        validate_part(view, part, calls)?;
                     }
                 }
+                // OpenAI sends a tool-call message's empty content as null.
+                Value::Null if doc.member(message, "tool_calls")?.is_some() => (),
                 _ => return Err(Error::Unsupported),
             }
         }
@@ -71,10 +72,12 @@ fn messages(view: RequestView<'_>) -> Result<()> {
                 }
             }
         }
+        calls = doc.member(message, "tool_calls")?;
     }
     Ok(())
 }
-/// A Chat tool message answers a call of the preceding message and carries only text.
+/// A Chat tool message, or a tool result without Gemini's `result`, answers a call of the
+/// preceding message and carries only text.
 fn tool_message(doc: &Document, message: usize, calls: Option<usize>) -> Result<()> {
     let id = doc.required(message, "tool_call_id")?;
     super::string(doc, id)?;
@@ -213,13 +216,16 @@ fn extension(doc: &Document, x: usize) -> Result<()> {
     }
     Ok(())
 }
-fn validate_part(view: RequestView<'_>, part: usize) -> Result<()> {
+fn validate_part(view: RequestView<'_>, part: usize, calls: Option<usize>) -> Result<()> {
     let doc = view.document;
     let kind = doc.required(part, "type")?;
     if doc.string_is(kind, "text")? || doc.string_is(kind, "reasoning")? {
         return super::string(doc, doc.required(part, "text")?);
     }
     if doc.string_is(kind, "tool_result")? {
+        if doc.member(part, "result")?.is_none() {
+            return tool_message(doc, part, calls);
+        }
         super::string(doc, doc.required(part, "tool_call_id")?)?;
         return Ok(());
     }
