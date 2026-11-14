@@ -101,7 +101,7 @@ fn tool_message(doc: &Document, message: usize, calls: Option<usize>) -> Result<
             Ok(())
         }
         Some(content) => match doc.node(content)?.value {
-            Value::String(_) | Value::Text(_) | Value::Fragments => Ok(()),
+            Value::String(_) | Value::Text(_) | Value::Fragments | Value::Utf8Media => Ok(()),
             _ => Err(Error::Unsupported),
         },
         None => Ok(()),

@@ -19,3 +19,19 @@ fn repeated_candidate_metadata_keeps_the_last_part() {
         ]
     );
 }
+
+/// A long Chat tool result that ingress keeps as mapped UTF-8 media reaches Gemini as the
+/// function response text.
+#[test]
+fn long_chat_tool_result_reaches_gemini() {
+    let text = "x".repeat(40_000);
+    let input = json!({"model":"m","messages":[
+        {"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"f","arguments":"{}"}}]},
+        {"role":"tool","tool_call_id":"a","content":text}
+    ]});
+    let out = super::regressions::chat_to_gemini(&serde_json::to_vec(&input).unwrap());
+    assert_eq!(
+        out["contents"][1]["parts"][0]["functionResponse"],
+        json!({"name":"f","id":"a","response":{"result":text}})
+    );
+}
