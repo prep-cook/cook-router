@@ -111,6 +111,12 @@ impl State {
             },
         )?;
         self.base = Some(base);
+        self.keep_time(owner, doc)
+    }
+    fn keep_time(&mut self, owner: &mut Writer, doc: &Document) -> Result<()> {
+        if let Some(n) = doc.member(doc.root(), "createTime")? {
+            self.time = Some(super::super::mapped(owner, |e| doc.write(n, e))?);
+        }
         Ok(())
     }
     /// The base chunk fields: the body's `responseId` and `modelVersion`, else the published
@@ -172,8 +178,10 @@ impl State {
         }
         let time = doc.member(root, "createTime")?;
         if let Some(n) = time {
-            let created = base.unsigned(base.required(base.root(), "created")?)?;
-            changed |= unix_seconds(doc, n)?.is_some_and(|t| t != created);
+            changed |= match &self.time {
+                Some(old) => !super::super::same(old, old.root(), doc, n)?,
+                None => true,
+            };
         }
         if !changed {
             return Ok(());
@@ -199,7 +207,7 @@ impl State {
             },
         )?;
         self.base = Some(base);
-        Ok(())
+        self.keep_time(owner, doc)
     }
     fn count(&mut self, owner: &mut Writer, doc: &Document) -> Result<()> {
         let root = doc.root();

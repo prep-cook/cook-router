@@ -135,3 +135,35 @@ fn streamed_content_extras_merge() {
         );
     }
 }
+
+/// A later createTime reaches the client when its spelling changes, even within the same
+/// second or when it first appears at the Unix epoch.
+#[test]
+fn create_time_updates_below_one_second_reach_egress() {
+    for (initial, late) in [
+        (Some("2026-11-15T00:00:00.123Z"), "2026-11-15T00:00:00.999Z"),
+        (None, "1970-01-01T00:00:00Z"),
+    ] {
+        let mut first = json!({"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]});
+        if let Some(time) = initial {
+            first["createTime"] = json!(time);
+        }
+        let rows = [first, json!({"createTime":late,"usageMetadata":{"promptTokenCount":1}})];
+        for downstream in [Framing::Json, Framing::Sse] {
+            let (out, _) = response(&sse(&rows), Framing::Sse, downstream, Operation::Generate);
+            let last = match downstream {
+                Framing::Json => serde_json::from_slice::<Value>(&out).unwrap(),
+                _ => events(&out).pop().unwrap(),
+            };
+            assert_eq!(last["createTime"], late, "{last}");
+        }
+    }
+    // An unchanged createTime publishes no identity update.
+    let time = "2026-11-15T00:00:00.123Z";
+    let rows = [
+        json!({"createTime":time,"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}),
+        json!({"createTime":time,"usageMetadata":{"promptTokenCount":1}}),
+    ];
+    let (_, canonical) = response(&sse(&rows), Framing::Sse, Framing::Json, Operation::Generate);
+    assert!(!canonical.iter().any(|v| v["choices"] == json!([])), "{canonical:?}");
+}

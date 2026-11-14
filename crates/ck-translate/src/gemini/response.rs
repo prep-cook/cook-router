@@ -42,6 +42,8 @@ struct State {
     identity: Identity,
     operation: Operation,
     base: Option<Document>,
+    /// The native `createTime` last published, compared by spelling rather than by second.
+    time: Option<Document>,
     usage: Option<Document>,
     choices: Table<Choice>,
     next_item: u64,
@@ -99,6 +101,7 @@ impl Ingress {
                 identity,
                 operation,
                 base: None,
+                time: None,
                 usage: None,
                 choices: Table::new(owner)?,
                 next_item: 0,
