@@ -245,3 +245,24 @@ fn chat_message_from_a_buffered_anthropic_body_has_a_role() {
     assert_eq!(first["choices"][0]["delta"]["role"], "assistant", "{first}");
 }
 
+#[test]
+fn chat_usage_uses_chat_count_names_with_reasoning_and_cache_details() {
+    for (source, upstream, name, (prompt, completion, reasoning)) in [
+        (Source::Anthropic, BodyMode::Buffered, "b3_think_nonstream.json", (447, 361, 229)),
+        (Source::Anthropic, BodyMode::Streaming, "b3_think_stream.sse", (447, 117, 42)),
+        (Source::Responses, BodyMode::Streaming, "relay-medium-resp-reason1.sse", (30, 191, 183)),
+        (Source::Responses, BodyMode::Buffered, "relay-chat2resp.json", (19, 11, 0)),
+    ] {
+        let output = run(source, upstream, &fixture(name), Client::Chat, BodyMode::Buffered);
+        let usage = &serde_json::from_slice::<Value>(&output).unwrap()["usage"];
+        assert_eq!(usage["prompt_tokens"], prompt, "{name}: {usage}");
+        assert_eq!(usage["completion_tokens"], completion, "{name}: {usage}");
+        assert_eq!(usage["total_tokens"], prompt + completion, "{name}: {usage}");
+        assert_eq!(usage["prompt_tokens_details"]["cached_tokens"], 0, "{name}: {usage}");
+        assert_eq!(usage["completion_tokens_details"]["reasoning_tokens"], reasoning, "{name}: {usage}");
+        for native in ["input_tokens", "output_tokens", "input_tokens_details", "output_tokens_details"] {
+            assert!(usage.get(native).is_none(), "{name}: {usage}");
+        }
+    }
+}
+
