@@ -5,16 +5,14 @@ use crate::codec::{
     Error, Result,
     document::{Document, Name, Value},
     encode,
-    event::Kind,
+    event::{Kind, LocalId},
 };
 use ck_stream::{ScratchLease, Writer};
 
 impl Egress {
     /// The open block a record's `item_id` and `block_index` name.
     fn block(&self, event: &Document) -> Result<usize> {
-        let x = event.required(event.root(), "x_ck")?;
-        let item = local(event, event.required(x, "item_id")?)?;
-        let index = event.unsigned(event.required(x, "block_index")?)?;
+        let (item, index) = key(event)?;
         self.blocks
             .iter()
             .position(|b| b.item == item && b.index == index)
@@ -43,6 +41,7 @@ impl Egress {
             media: None,
             thought,
             held: false,
+            split: false,
         })?;
         Ok(())
     }
@@ -98,9 +97,28 @@ impl Egress {
         };
         move_absorbed(doc, event, fragment, target)
     }
-    pub(super) fn tool_start(&mut self, event: Document) -> Result<()> {
+    pub(super) fn tool_start(&mut self, owner: &mut Writer, event: Document) -> Result<()> {
         let root = event.root();
         let x = event.required(root, "x_ck")?;
+        if event.member(x, "block_index")?.is_none() {
+            let choice = event.unsigned(event.required(x, "choice_index")?)?;
+            self.open_choice(choice)?;
+            let (item, index) = key(&event)?;
+            if self.blocks.iter().any(|b| b.item == item && b.index == index) {
+                return Err(Error::Schema);
+            }
+            self.blocks.push(Block {
+                item,
+                index,
+                choice,
+                document: empty_part(owner, false)?,
+                arguments: None,
+                media: None,
+                thought: false,
+                held: false,
+                split: false,
+            })?;
+        }
         let name = event.required(root, "name")?;
         let id = match event
             .member(x, "source")?
@@ -108,7 +126,11 @@ impl Egress {
             .transpose()?
             .flatten()
         {
-            Some(ids) => event.member(ids, "id")?,
+            // A Responses source names the call by `call_id`; its `id` is the output item's.
+            Some(ids) => match event.member(ids, "call_id")? {
+                Some(id) => Some(id),
+                None => event.member(ids, "id")?,
+            },
             None => None,
         };
         let block = self.block(&event)?;
@@ -123,8 +145,53 @@ impl Egress {
         entry.arguments = Some(doc.add(None, Value::Fragments)?);
         Ok(())
     }
-    /// Parses the collected argument fragments into the call's `args` object.
-    pub(super) fn tool_end(&mut self, owner: &mut Writer, event: &Document) -> Result<()> {
+    /// Parses the collected argument fragments into the call's `args` object, and ends the
+    /// part of a call outside any block.
+    pub(super) fn tool_end(
+        &mut self,
+        owner: &mut Writer,
+        event: &Document,
+        output: &mut impl FnMut(ScratchLease) -> Result<()>,
+    ) -> Result<()> {
+        self.tool_args(owner, event)?;
+        let x = event.required(event.root(), "x_ck")?;
+        if event.member(x, "block_index")?.is_none() {
+            let block = self.block(event)?;
+            self.write_earlier(owner, block, output)?;
+            self.block_end(owner, event, output)?;
+        }
+        Ok(())
+    }
+    /// Writes out what the other open parts of `block`'s choice hold, so a call outside any
+    /// block follows the text that preceded it.
+    fn write_earlier(
+        &mut self,
+        owner: &mut Writer,
+        block: usize,
+        output: &mut impl FnMut(ScratchLease) -> Result<()>,
+    ) -> Result<()> {
+        let choice = self.blocks[block].choice;
+        for other in 0..self.blocks.len() {
+            // Another call outside any block is still open and stays whole.
+            if other == block || self.blocks[other].choice != choice || self.blocks[other].arguments.is_some() {
+                continue;
+            }
+            if self.body.is_none() {
+                if self.blocks[other].held {
+                    self.write_part(owner, other, output)?;
+                }
+                continue;
+            }
+            let doc = &self.blocks[other].document;
+            if doc.node(doc.root())?.first.is_some() {
+                let document = std::mem::replace(&mut self.blocks[other].document, empty_part(owner, false)?);
+                self.blocks[other].split = true;
+                self.append_part(choice, document)?;
+            }
+        }
+        Ok(())
+    }
+    fn tool_args(&mut self, owner: &mut Writer, event: &Document) -> Result<()> {
         let block = self.block(event)?;
         let entry = &mut self.blocks[block];
         let arguments = entry.arguments.take().ok_or(Error::Schema)?;
@@ -208,7 +275,19 @@ impl Egress {
             self.blocks.swap_remove(block);
             return Ok(());
         }
-        let Block { choice, document, .. } = self.blocks.swap_remove(block);
+        let Block {
+            choice,
+            document,
+            split,
+            ..
+        } = self.blocks.swap_remove(block);
+        if split && document.node(document.root())?.first.is_none() {
+            return Ok(());
+        }
+        self.append_part(choice, document)
+    }
+    /// Appends a part to the buffered candidate of `choice`.
+    fn append_part(&mut self, choice: u64, document: Document) -> Result<()> {
         let slot = self.choice(choice)?;
         let candidate = self.choices[slot].node.ok_or(Error::Schema)?;
         let body = self.body.as_mut().ok_or(Error::Schema)?;
@@ -233,6 +312,15 @@ impl Egress {
         }
         self.choices[slot].part = Some(document);
         Ok(())
+    }
+}
+/// A record's block: its `item_id` and `block_index`, or for a call outside any block (Chat
+/// and Responses sources) its `tool_call_id` with an index no block uses.
+fn key(event: &Document) -> Result<(LocalId, u64)> {
+    let x = event.required(event.root(), "x_ck")?;
+    match event.member(x, "block_index")? {
+        Some(index) => Ok((local(event, event.required(x, "item_id")?)?, event.unsigned(index)?)),
+        None => Ok((local(event, event.required(x, "tool_call_id")?)?, u64::MAX)),
     }
 }
 /// The part's object member `name`, added when absent.

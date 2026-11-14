@@ -61,6 +61,8 @@ struct Block {
     thought: bool,
     /// A streamed part holds its latest text until more text, its signature or its end arrives.
     held: bool,
+    /// A buffered part whose content so far was written ahead of a tool call outside any block.
+    split: bool,
 }
 impl Egress {
     pub fn new(
@@ -125,8 +127,8 @@ impl Egress {
             Kind::BlockStart => self.block_start(owner, event)?,
             Kind::Chunk => self.chunk(owner, event, output)?,
             Kind::ReasoningSignature => self.signature(event)?,
-            Kind::ToolStart => self.tool_start(event)?,
-            Kind::ToolEnd => self.tool_end(owner, &event)?,
+            Kind::ToolStart => self.tool_start(owner, event)?,
+            Kind::ToolEnd => self.tool_end(owner, &event, output)?,
             Kind::ToolResult | Kind::CodeExecution | Kind::MediaTranscript => self.part_value(kind, event)?,
             Kind::MediaStart => self.media_start(event)?,
             Kind::Data => self.data(event)?,

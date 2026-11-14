@@ -134,6 +134,10 @@ impl State {
         position: usize,
         buffered: bool,
     ) -> Result<()> {
+        // Some OpenAI-compatible upstreams send `"tool_calls":null` for a message without calls.
+        if matches!(doc.node(field)?.value, Value::Null) {
+            return Ok(());
+        }
         if !matches!(doc.node(field)?.value, Value::Array) {
             return Err(Error::Schema);
         }
