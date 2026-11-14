@@ -412,7 +412,8 @@ fn write_usage(doc: &Document, e: &mut Encoder<'_, '_>) -> Result<()> {
     }
     e.bytes(b"}")
 }
-/// Claude's uncached input, when inclusive input and both cache components are known and consistent.
+/// Claude's uncached input, when inclusive input is known and consistent with the cache
+/// components; an unreported cache component counts as 0.
 fn derived_uncached(doc: &Document, root: usize) -> Result<Option<u64>> {
     let mut counts = [0; 3];
     for (count, key) in counts
@@ -420,7 +421,10 @@ fn derived_uncached(doc: &Document, root: usize) -> Result<Option<u64>> {
         .zip(["input_tokens", "cache_read_tokens", "cache_write_tokens"])
     {
         let Some(node) = doc.member(root, key)? else {
-            return Ok(None);
+            if key == "input_tokens" {
+                return Ok(None);
+            }
+            continue;
         };
         let Ok(value) = doc.unsigned(node) else {
             return Ok(None);

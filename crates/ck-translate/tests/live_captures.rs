@@ -290,3 +290,26 @@ fn gemini_usage_reports_candidates_with_or_without_thoughts() {
     assert_eq!(usage["candidatesTokenCount"], 2, "{usage}");
 }
 
+#[test]
+fn anthropic_input_tokens_count_an_unreported_cache_write_as_zero() {
+    let output = run(
+        Source::Chat,
+        BodyMode::Buffered,
+        &fixture("ds-chat-text.json"),
+        Client::Anthropic,
+        BodyMode::Buffered,
+    );
+    let usage = &serde_json::from_slice::<Value>(&output).unwrap()["usage"];
+    assert_eq!(usage["input_tokens"], 48, "{usage}");
+    let body = json!({"id":"r","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"x"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}});
+    let output = run(
+        Source::Chat,
+        BodyMode::Buffered,
+        &serde_json::to_vec(&body).unwrap(),
+        Client::Anthropic,
+        BodyMode::Buffered,
+    );
+    let usage = &serde_json::from_slice::<Value>(&output).unwrap()["usage"];
+    assert_eq!(usage["input_tokens"], 10, "{usage}");
+}
+
