@@ -406,8 +406,9 @@ fn project_usage(event: &Document, usage: usize, e: &mut Encoder<'_, '_>) -> Res
             _ => Ok(None),
         }
     };
-    if let (Some(output), Some(reasoning)) = (count("output_tokens")?, count("reasoning_tokens")?)
-        && let Some(candidates) = output.checked_sub(reasoning)
+    // An unreported reasoning count means no thoughts.
+    if let Some(output) = count("output_tokens")?
+        && let Some(candidates) = output.checked_sub(count("reasoning_tokens")?.unwrap_or(0))
     {
         if !first {
             e.bytes(b",")?;

@@ -395,6 +395,10 @@ impl State {
         origin: Option<(&Source, &sse::Event)>,
     ) -> Result<()> {
         let position = self.open(index)?;
+        // The API opens every tool_use with an empty fragment, which carries no JSON to scan.
+        if fragment && doc.string_is(value, "")? {
+            return Ok(());
+        }
         let block = &mut self.blocks[position];
         let (source, parser) = block.arguments.as_mut().ok_or(Error::Schema)?;
         let lease = encode::scratch(owner, |e| {

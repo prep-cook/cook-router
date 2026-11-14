@@ -199,12 +199,19 @@ impl Reduction {
         })
     }
 
-    /// Fills the native usage value from canonical counts it lacks and publishes it as a chunk.
+    /// Publishes usage as a chunk: a Chat source's native value, filled from canonical counts it
+    /// lacks, or for any other source the Chat projection of the canonical counts.
     fn project_usage(&self, owner: &mut Writer, doc: &mut Document, x: usize) -> Result<Document> {
         let root = doc.root();
         let usage = doc.required(root, "usage")?;
         let native = doc.required(usage, "native")?;
-        let value = doc.required(native, "value")?;
+        let chat = doc.string_is(doc.required(native, "protocol")?, "chat")?;
+        // A foreign native value names its counts differently, so it never stands in for Chat usage.
+        let value = if chat {
+            doc.required(native, "value")?
+        } else {
+            doc.set(native, "chat", Value::Object)?
+        };
         for (canonical, wire) in [
             ("input_tokens", "prompt_tokens"),
             ("output_tokens", "completion_tokens"),
@@ -215,6 +222,15 @@ impl Reduction {
                 && let Some(n) = doc.member(usage, canonical)?
             {
                 doc.set(value, wire, Value::Unsigned(doc.unsigned(n)?))?;
+            }
+        }
+        for (canonical, detail, wire) in [
+            ("cache_read_tokens", "prompt_tokens_details", "cached_tokens"),
+            ("reasoning_tokens", "completion_tokens_details", "reasoning_tokens"),
+        ] {
+            if !chat && let Some(n) = doc.member(usage, canonical)? {
+                let details = doc.set(value, detail, Value::Object)?;
+                doc.set(details, wire, Value::Unsigned(doc.unsigned(n)?))?;
             }
         }
         mapped_document(owner, |e| {
