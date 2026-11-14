@@ -208,7 +208,16 @@ impl Egress {
             let sse = super::super::is(event, root, "name", "gemini.sse")?
                 || super::super::is(event, root, "name", "gemini.event")?;
             if sse && self.framing == Framing::Sse {
-                return output(encode::scratch(owner, |e| sse_event(event, e))?);
+                // Held parts precede the native event, as they did in the source.
+                for slot in 0..self.choices.len() {
+                    if self.choices[slot].part.is_some() {
+                        let fields = !self.choices[slot].finished;
+                        self.flush(owner, slot, fields, output)?;
+                    }
+                }
+                output(encode::scratch(owner, |e| sse_event(event, e))?)?;
+                self.open_event = !super::super::is(event, root, "format", "text")?;
+                return Ok(());
             }
             (self.diagnostic)(if sse {
                 Diagnostic::SseMetadata
@@ -267,7 +276,8 @@ impl Egress {
         Ok(())
     }
 }
-/// Restores a native SSE event: its fields, then its data lines when it travelled as text.
+/// Restores a native SSE event: its fields, then its data lines and the blank line that ends
+/// it when it travelled as text. Fields alone open the event of the next data record.
 fn sse_event(event: &Document, e: &mut Encoder<'_, '_>) -> Result<()> {
     let root = event.root();
     let x = event.required(root, "x_ck")?;
@@ -296,9 +306,9 @@ fn sse_event(event: &Document, e: &mut Encoder<'_, '_>) -> Result<()> {
                 c => e.bytes(c.encode_utf8(&mut [0; 4]).as_bytes())?,
             }
         }
-        e.bytes(b"\n")?;
+        e.bytes(b"\n\n")?;
     }
-    e.bytes(b"\n")
+    Ok(())
 }
 fn line(doc: &Document, node: usize, e: &mut Encoder<'_, '_>) -> Result<()> {
     let mut chars = doc.chars(node)?;

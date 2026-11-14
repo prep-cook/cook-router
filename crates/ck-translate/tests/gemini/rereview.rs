@@ -57,3 +57,32 @@ fn native_and_canonical_call_ids_never_collide_in_chat() {
     assert_eq!(calls[0]["id"], "a");
     assert_ne!(calls[1]["id"], "a");
 }
+
+/// Held parts are written before an event with an unknown name, and SSE fields open the
+/// event of the data they came with, so streamed output keeps the source order.
+#[test]
+fn held_parts_keep_their_place_around_native_events() {
+    let text = |t: &str| json!({"candidates":[{"content":{"parts":[{"text":t}]}}]});
+    let mut wire = sse(&[text("before")]);
+    wire.extend(b"event: future_event\ndata: marker\n\n");
+    wire.extend(sse(&[json!({"candidates":[{"content":{"parts":[{"text":"after"}]},"finishReason":"STOP"}]})]));
+    let (out, _) = response(&wire, Framing::Sse, Framing::Sse, Operation::Generate);
+    let raw = String::from_utf8(out).unwrap();
+    let at = |needle: &str| raw.find(needle).unwrap_or_else(|| panic!("{needle} missing: {raw}"));
+    assert!(at("\"before\"") < at("event: future_event\ndata: marker\n\n"), "{raw}");
+    assert!(at("data: marker") < at("\"after\""), "{raw}");
+
+    let body = json!({"candidates":[{"content":{"parts":[{"text":"a"},{"text":"b"}]},"finishReason":"STOP"}]});
+    let wire = format!("id: ev1\nretry: 1500\nevent: message\ndata: {body}\n\n");
+    let (out, _) = response(wire.as_bytes(), Framing::Sse, Framing::Sse, Operation::Generate);
+    let raw = String::from_utf8(out.clone()).unwrap();
+    assert!(raw.starts_with("id: ev1\nretry: 1500\nevent: message\ndata: {"), "{raw}");
+    assert!(raw.ends_with("\n\n") && raw.matches("id: ev1").count() == 1, "{raw}");
+    let rows = events(&out);
+    assert_eq!(rows[0]["candidates"][0]["content"]["parts"][0]["text"], "a", "{raw}");
+    let (again, _) = response(&out, Framing::Sse, Framing::Json, Operation::Generate);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&again).unwrap()["candidates"][0]["content"]["parts"],
+        json!([{"text":"a"},{"text":"b"}])
+    );
+}

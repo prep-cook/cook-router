@@ -235,12 +235,15 @@ impl State {
             return Ok(());
         }
         let doc = super::mapped(owner, |e| event.write_data(source, |bytes| e.bytes(bytes)))?;
-        self.body(owner, &doc)?;
+        // The event's other fields precede its body, so SSE egress writes them with its data.
         if event
             .fields()
             .iter()
             .any(|f| f.comment || !source.equals(f.name, b"data").unwrap_or(false))
         {
+            if self.base.is_none() {
+                self.start(owner, &doc)?;
+            }
             self.emitter.emit(
                 owner,
                 Kind::Opaque,
@@ -249,7 +252,7 @@ impl State {
                 |e| sse_source(source, event, e),
             )?;
         }
-        Ok(())
+        self.body(owner, &doc)
     }
     fn chunk(
         &mut self,

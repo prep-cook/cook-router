@@ -36,6 +36,8 @@ pub struct Egress {
     terminal: bool,
     failed: bool,
     array_started: bool,
+    /// SSE fields were written without data; the next record completes their event.
+    open_event: bool,
     diagnostic: fn(Diagnostic),
 }
 struct Choice {
@@ -103,6 +105,7 @@ impl Egress {
             terminal: false,
             failed: false,
             array_started: false,
+            open_event: false,
             diagnostic,
         })
     }
@@ -275,6 +278,7 @@ impl Egress {
             e.bytes(suffix)
         })?)?;
         self.array_started = true;
+        self.open_event = false;
         Ok(())
     }
     fn choice(&mut self, index: u64) -> Result<usize> {
@@ -329,7 +333,12 @@ impl Egress {
                 let close: &[u8] = if self.array_started { b"]" } else { b"[]" };
                 output(encode::scratch(owner, |e| e.bytes(close))?)?;
             }
-            Framing::Sse => self.last(owner, output)?,
+            Framing::Sse => {
+                self.last(owner, output)?;
+                if self.open_event {
+                    output(encode::scratch(owner, |e| e.bytes(b"\n"))?)?;
+                }
+            }
         }
         self.terminal = true;
         Ok(())
