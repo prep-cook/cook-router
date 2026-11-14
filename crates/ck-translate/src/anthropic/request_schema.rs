@@ -5,13 +5,13 @@ use crate::codec::{
 };
 use std::collections::hash_map::RandomState;
 
-pub(super) fn validate(view: RequestView<'_>) -> Result<()> {
+pub(super) fn validate(view: RequestView<'_>, default_max_tokens: Option<u64>) -> Result<()> {
     if view.operation == Operation::Compact {
         return Err(Error::Unsupported);
     }
     let doc = view.document;
     let root = doc.root();
-    let messages = parameters(doc, root, view.operation)?;
+    let messages = parameters(doc, root, view.operation, default_max_tokens)?;
     doc.with_table(|index| {
         let hasher = RandomState::new();
         index_calls(doc, messages, index, &hasher)?;
@@ -49,7 +49,7 @@ fn roles(view: RequestView<'_>, messages: usize, (index, hasher): (&CallIndex, &
     Ok(())
 }
 /// Checks the top-level generation parameters and returns the messages array.
-fn parameters(doc: &Document, root: usize, operation: Operation) -> Result<usize> {
+fn parameters(doc: &Document, root: usize, operation: Operation, default_max_tokens: Option<u64>) -> Result<usize> {
     super::string(doc, doc.required(root, "model")?)?;
     if doc.chars(doc.required(root, "model")?)?.next_scalar()?.is_none() {
         return Err(Error::Schema);
@@ -58,8 +58,14 @@ fn parameters(doc: &Document, root: usize, operation: Operation) -> Result<usize
     if !matches!(doc.node(messages)?.value, Value::Array) {
         return Err(Error::Schema);
     }
-    if operation == Operation::Generate && doc.unsigned(doc.required(root, "max_tokens")?)? == 0 {
-        return Err(Error::Schema);
+    if operation == Operation::Generate {
+        let max_tokens = match doc.member(root, "max_tokens")? {
+            Some(max_tokens) => doc.unsigned(max_tokens)?,
+            None => default_max_tokens.ok_or(Error::Schema)?,
+        };
+        if max_tokens == 0 {
+            return Err(Error::Schema);
+        }
     }
     for key in ["temperature", "top_p"] {
         if let Some(n) = doc.member(root, key)?

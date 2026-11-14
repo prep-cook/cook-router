@@ -16,6 +16,9 @@ mod golden;
 #[path = "anthropic/blocks.rs"]
 mod blocks;
 
+#[path = "anthropic/policy.rs"]
+mod policy;
+
 // Test-only inclusion until the framework owner declares the production module.
 #[path = "../src/anthropic/mod.rs"]
 pub mod anthropic;
@@ -85,11 +88,12 @@ fn request_fragmented(input: &[u8], operation: Operation, fragment: usize) -> (V
         ingress.advance(&mut mapped.writer, chunk).unwrap();
     }
     let ready = ingress
-        .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability)
+        .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability::default())
         .unwrap();
     let output = anthropic::request::Egress {
         destination: "anthropic",
         upstream_stream: operation == Operation::Generate,
+        default_max_tokens: None,
     }
     .encode(&ready, &mut mapped.writer)
     .unwrap();
@@ -364,7 +368,7 @@ fn invalid_late_request_and_foreign_replay_cannot_cross_fence() {
         assert!(
             result.is_err()
                 || ingress
-                    .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability)
+                    .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability::default())
                     .is_err()
         );
         let raw = mapped.output(&mapped.writer);
