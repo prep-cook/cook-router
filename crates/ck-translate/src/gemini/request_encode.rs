@@ -127,7 +127,7 @@ fn generation_config(
             e.bytes(b":")?;
             if canonical == "modalities" {
                 modalities(doc, n, e)?;
-            } else if canonical == "stop" && !matches!(doc.node(n)?.value, Value::Array) {
+            } else if canonical == "stop" && super::string(doc, n).is_ok() {
                 e.bytes(b"[")?;
                 doc.write(n, e)?;
                 e.bytes(b"]")?;

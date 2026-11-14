@@ -86,3 +86,13 @@ fn held_parts_keep_their_place_around_native_events() {
         json!([{"text":"a"},{"text":"b"}])
     );
 }
+
+/// A null stop control stays unset; only a single string becomes a one-element list.
+#[test]
+fn null_stop_stays_unset() {
+    let input = json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"stopSequences":null}});
+    assert_eq!(request(&input, Operation::Generate).0, input);
+    let out = super::regressions::chat_to_gemini(br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"stop":null}"#);
+    let stop = &out["generationConfig"]["stopSequences"];
+    assert!(stop.is_null(), "{out}");
+}
