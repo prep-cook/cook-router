@@ -201,14 +201,11 @@ fn classify(doc: &Document, source: &Source, event: &sse::Event) -> Result<Optio
 }
 
 impl State {
+    /// Maps one SSE record. After the terminal event only blank lines, which SSE permits, are
+    /// accepted.
     pub(super) fn event(&mut self, owner: &mut Writer, source: &Source, event: &sse::Event) -> Result<()> {
-        if self.terminal {
-            // SSE permits further blank lines after the terminal event.
-            return if event.fields().is_empty() {
-                Ok(())
-            } else {
-                Err(Error::Closed)
-            };
+        if self.terminal && !event.fields().is_empty() {
+            return Err(Error::Closed);
         }
         if !event.has_data(source)? {
             if !event.fields().is_empty() {

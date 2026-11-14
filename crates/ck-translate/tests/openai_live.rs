@@ -120,8 +120,15 @@ fn run<E: ResponseEgress>(
     let mut reader = m.store.reader(m.writer.id(), 0).unwrap();
     let mut ingress: Box<dyn ResponseIngress> = match upstream {
         Upstream::Chat => Box::new(
-            codec::chat::response::Ingress::new(&mut m.writer, &m.store, identity(), Operation::Generate, mode, 1 << 22)
-                .unwrap(),
+            codec::chat::response::Ingress::new(
+                &mut m.writer,
+                &m.store,
+                identity(),
+                Operation::Generate,
+                mode,
+                1 << 22,
+            )
+            .unwrap(),
         ),
         Upstream::Responses => Box::new(
             responses::response::Ingress::new(&mut m.writer, identity(), Operation::Generate, mode, 1 << 22).unwrap(),
@@ -142,7 +149,7 @@ fn run<E: ResponseEgress>(
                     out.extend_from_slice(&bytes(&part));
                     Ok(())
                 })
-                .unwrap_or_else(|e| panic!("{client:?} egress: {e:?}", client = std::any::type_name::<E>()));
+                .unwrap_or_else(|e| panic!("{} egress: {e:?}", std::any::type_name::<E>()));
         }
         if let Err(error) = result {
             failure = Some(format!("{error:?}"));
@@ -177,12 +184,21 @@ fn chat_null_logprobs_reach_responses_clients() {
     let source: Value = serde_json::from_slice(DS_TEXT).unwrap();
     assert!(source["choices"][0]["logprobs"].is_null());
     for downstream in [BodyMode::Buffered, BodyMode::Streaming] {
-        let (out, failure) = decode(Upstream::Chat, DS_TEXT, BodyMode::Buffered, 61, Client::Responses(downstream));
+        let (out, failure) = decode(
+            Upstream::Chat,
+            DS_TEXT,
+            BodyMode::Buffered,
+            61,
+            Client::Responses(downstream),
+        );
         assert_eq!(failure, None);
         let response = final_response(&out, downstream);
         assert_eq!(response["status"], "completed");
         let message = response["output"].as_array().unwrap().last().unwrap();
-        assert_eq!(message["content"][0]["text"], source["choices"][0]["message"]["content"]);
+        assert_eq!(
+            message["content"][0]["text"],
+            source["choices"][0]["message"]["content"]
+        );
     }
 }
 
@@ -194,7 +210,10 @@ fn chat_null_content_beside_tool_calls_reaches_responses_clients() {
         .unwrap()
         .replacen("\"content\":\"\"", "\"content\":null", 1);
     assert!(std::str::from_utf8(DS_TOOLS).unwrap().contains("\"content\":null"));
-    for (input, mode) in [(DS_TOOLS, BodyMode::Streaming), (buffered.as_bytes(), BodyMode::Buffered)] {
+    for (input, mode) in [
+        (DS_TOOLS, BodyMode::Streaming),
+        (buffered.as_bytes(), BodyMode::Buffered),
+    ] {
         for downstream in [BodyMode::Buffered, BodyMode::Streaming] {
             let (out, failure) = decode(Upstream::Chat, input, mode, 61, Client::Responses(downstream));
             assert_eq!(failure, None);
@@ -226,9 +245,18 @@ fn responses_error_event_ends_every_client_with_an_upstream_failure() {
 #[test]
 fn blank_lines_after_the_responses_terminal_event_are_ignored() {
     assert!(RELAY_RESPONSES_TOOL.ends_with(b"}\n\n\n"));
-    for client in [Client::Responses(BodyMode::Buffered), Client::Responses(BodyMode::Streaming)] {
+    for client in [
+        Client::Responses(BodyMode::Buffered),
+        Client::Responses(BodyMode::Streaming),
+    ] {
         for step in [61, RELAY_RESPONSES_TOOL.len() - 1] {
-            let (_, failure) = decode(Upstream::Responses, RELAY_RESPONSES_TOOL, BodyMode::Streaming, step, client);
+            let (_, failure) = decode(
+                Upstream::Responses,
+                RELAY_RESPONSES_TOOL,
+                BodyMode::Streaming,
+                step,
+                client,
+            );
             assert_eq!(failure, None, "{client:?} step {step}");
         }
     }
