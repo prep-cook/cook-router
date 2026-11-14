@@ -82,7 +82,12 @@ impl Ingress {
 }
 impl codec::ResponseIngress for Ingress {
     fn advance(&mut self, owner: &mut Writer, bytes: &[u8]) -> Result<()> {
-        crate::boundary::enter(self.owner, owner, self.failed || self.state.terminal)?;
+        // SSE permits further blank lines after the terminal event.
+        let blank = self.scanner.is_some() && bytes.iter().all(|b| matches!(b, b'\r' | b'\n'));
+        crate::boundary::enter(self.owner, owner, self.failed || (self.state.terminal && !blank))?;
+        if self.state.terminal {
+            return Ok(());
+        }
         let result = (|| {
             let Some(scanner) = &mut self.scanner else {
                 let buffered = self.buffered.as_mut().ok_or(Error::Closed)?;

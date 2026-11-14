@@ -29,12 +29,16 @@ impl<F: FnMut(&'static str, u64)> Egress<F> {
             ("refusal", "refusal", "response.refusal.delta"),
             ("reasoning_content", "text", "response.reasoning_summary_text.delta"),
         ] {
-            if let Some(value) = doc.member(delta, from)? {
+            // A null member is absent: Chat sends `"content":null` beside tool calls.
+            if let Some(value) = doc.member(delta, from)?
+                && !matches!(doc.node(value)?.value, Value::Null)
+            {
                 let reasoning = from == "reasoning_content";
                 return self.text_delta(owner, at, (choice, delta, value), (native, name, reasoning), output);
             }
         }
         if let Some(logprobs) = doc.member(choice, "logprobs")?
+            && !matches!(doc.node(logprobs)?.value, Value::Null)
             && let Some(tokens) = doc.member(logprobs, "content")?
         {
             return self.logprobs_delta(owner, at, tokens, output);

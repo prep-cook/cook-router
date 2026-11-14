@@ -203,7 +203,12 @@ fn classify(doc: &Document, source: &Source, event: &sse::Event) -> Result<Optio
 impl State {
     pub(super) fn event(&mut self, owner: &mut Writer, source: &Source, event: &sse::Event) -> Result<()> {
         if self.terminal {
-            return Err(Error::Closed);
+            // SSE permits further blank lines after the terminal event.
+            return if event.fields().is_empty() {
+                Ok(())
+            } else {
+                Err(Error::Closed)
+            };
         }
         if !event.has_data(source)? {
             if !event.fields().is_empty() {
