@@ -73,6 +73,20 @@ struct Place {
     message_index: u64,
     index: u64,
 }
+/// Canonical part member names; a wire member of the same name is kept as an original.
+const CANONICAL_PART: &[&str] = &[
+    "type",
+    "source",
+    "mime",
+    "timing",
+    "protocol",
+    "value",
+    "id",
+    "tool_call_id",
+    "result",
+    "arguments_format",
+    "function",
+];
 /// Moves one native part to its canonical home: a tool call, a tool result or a content part.
 fn normalize_part(owner: &mut Writer, doc: &mut Document, part: usize, place: Place, calls: &mut Calls) -> Result<()> {
     let mut payloads = 0;
@@ -92,19 +106,7 @@ fn normalize_part(owner: &mut Writer, doc: &mut Document, part: usize, place: Pl
     }
     // Wire members named like canonical part members stay originals before normalization
     // writes those names.
-    for key in [
-        "type",
-        "source",
-        "mime",
-        "timing",
-        "protocol",
-        "value",
-        "id",
-        "tool_call_id",
-        "result",
-        "arguments_format",
-        "function",
-    ] {
+    for &key in CANONICAL_PART {
         if let Some(n) = doc.remove(part, key)? {
             preserve(owner, doc, part, n, None)?;
         }
