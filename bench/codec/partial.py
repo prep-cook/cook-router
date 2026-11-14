@@ -6,7 +6,12 @@ that covers fewer protocols. This runs the same driver functions (manifest, desc
 alternating rounds, records, noise band, thresholds) on the workloads whose client and
 upstream protocols are both listed, so merged codecs can be measured before the rest.
 
-usage: CODEC_NOISE_BAND=... partial.py --protocols openai,claude OLD_CODEC NEW_CODEC OUT
+With `--ok-only PREVIOUS_OUT`, each workload keeps only the cases the new codec translated
+successfully in that earlier run (bench/codec/outcomes.py), and workloads left with no case
+are dropped, so both sides are timed over the same successful translations. The noise band
+still validates against the full manifest; its allowances were calibrated on all cases.
+
+usage: CODEC_NOISE_BAND=... partial.py --protocols openai,claude [--ok-only PREVIOUS_OUT] OLD_CODEC NEW_CODEC OUT
 """
 import importlib.util
 import os
@@ -18,6 +23,9 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("gate", HERE / "gate.py")
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
+spec = importlib.util.spec_from_file_location("outcomes", HERE / "outcomes.py")
+outcomes = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(outcomes)
 
 
 def identities(descriptions):
@@ -32,12 +40,20 @@ def identities(descriptions):
         raise ValueError("old/new configuration differs")
 
 
-def matrix(out, summary, protocols):
+def matrix(out, summary, protocols, ok_only):
     """Validate the band against the full manifest, then measure the selected subset."""
     full = gate.manifest()
     gate.save(out / "workloads-full.json", full)
     rows = [row for row in full["workloads"]
             if row["client_protocol"] in protocols and row["upstream_protocol"] in protocols]
+    if ok_only:
+        ok = outcomes.ok_cases(Path(ok_only))
+        if missing := {row["id"] for row in rows} - set(ok):
+            raise ValueError(f"{ok_only} has no outcomes for {len(missing)} selected workloads")
+        rows = [{**row, "cases": [case for case in row["cases"] if case["index"] in ok[row["id"]]]}
+                for row in rows]
+        rows = [row for row in rows if row["cases"]]
+        summary["ok_only_from"] = str(Path(ok_only).resolve())
     if not rows:
         raise ValueError(f"no workload uses only {sorted(protocols)}")
     data = {**full, "workloads": rows}
@@ -52,7 +68,7 @@ def matrix(out, summary, protocols):
     return full, data, path
 
 
-def run(protocols, old, new, out):
+def run(protocols, ok_only, old, new, out):
     out = gate.prepare(out)
     summary = {"schema_version": 1, "status": "error", "rounds": []}
     try:
@@ -60,7 +76,7 @@ def run(protocols, old, new, out):
         descriptions = {label: gate.describe(path, out, label) for label, path in executables.items()}
         summary["harnesses"] = descriptions
         identities(descriptions)
-        full, data, path = matrix(out, summary, protocols)
+        full, data, path = matrix(out, summary, protocols, ok_only)
         band_path = os.environ.get("CODEC_NOISE_BAND")
         band, allowances = gate.load_band(band_path, descriptions["old"], summary["full_manifest_sha256"],
                                           {row["id"] for row in full["workloads"]})
@@ -92,11 +108,16 @@ def run(protocols, old, new, out):
 
 
 def main():
-    if len(sys.argv) != 6 or sys.argv[1] != "--protocols":
+    args = sys.argv[1:]
+    ok_only = None
+    if len(args) == 7 and args[2] == "--ok-only":
+        ok_only = args.pop(3)
+        args.pop(2)
+    if len(args) != 5 or args[0] != "--protocols":
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
         return 2
     try:
-        return run(set(filter(None, sys.argv[2].split(","))), *sys.argv[3:])
+        return run(set(filter(None, args[1].split(","))), ok_only, *args[2:])
     except (OSError, ValueError) as error:
         print(f"codec partial: {error}", file=sys.stderr)
         return 2

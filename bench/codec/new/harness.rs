@@ -1,7 +1,8 @@
 //! New boundary-codec workload harness under bench/codec/CONTRACT.md. Instrumentation
 //! matches `baseline.rs`; the work runs through the S1 codecs and one ck-stream pool.
-use crate::ops::{Chunk, Prepared, Run, Samples, operation};
-use crate::protocols::Protocol;
+use crate::ops::{Chunk, Prepared, Run, Samples, operation, passes_own_fence};
+use crate::codec::Error;
+use crate::protocols::{Failure, Protocol};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -133,7 +134,26 @@ fn warm(cases: &[Prepared], run: &Run, warmup: u64, iterations: u64, outputs: &m
 struct Observed { start: BTreeMap<String, u64>, before: BTreeMap<String, u64>, after: BTreeMap<String, u64>,
     rss: u64, pss: u64, faults: (u64, u64), heap: (u64, u64, u64), charge: (u64, u64, u64) }
 
-fn run_workload(cases: &[Prepared], run: &Run, manifest: &Value, cg: &Path) -> Result<(Samples, Observed)> {
+/// Outcome of one case: a successful translation, input its source protocol's codec rejects,
+/// semantics the destination cannot carry, or a failure that is neither (limits, storage,
+/// harness plumbing). Schema at a destination stage refuses input that decoded and validated.
+fn outcome(failure: &Option<Failure>) -> Value {
+    let Some(Failure { stage, error }) = failure else { return json!({"outcome": "ok"}) };
+    let destination = matches!(*stage, "destination_fence" | "upstream_encode" | "client_encode");
+    let outcome = match error {
+        Error::Utf8 | Error::Json | Error::DuplicateKey | Error::Truncated => "invalid_input",
+        Error::Schema if destination => "unsupported",
+        Error::Schema => "invalid_input",
+        Error::Unsupported => "unsupported",
+        _ => "other_error",
+    };
+    let kind = format!("{error:?}");
+    let kind = kind.split('(').next().unwrap_or_default();
+    json!({"outcome": outcome, "stage": stage, "error": kind})
+}
+
+fn run_workload(cases: &[Prepared], run: &Run, manifest: &Value, cg: &Path)
+                -> Result<(Samples, Observed, Vec<Value>)> {
     let warmup = manifest["warmup_iterations"].as_u64().ok_or("missing warmup iterations")?;
     let iterations = manifest["measured_iterations"].as_u64().filter(|n| *n > 0).ok_or("invalid measured iterations")?;
     let mut outputs = Vec::with_capacity(1024);
@@ -146,12 +166,14 @@ fn run_workload(cases: &[Prepared], run: &Run, manifest: &Value, cg: &Path) -> R
     charge_peak_file.write_all(b"0")?;
     let before_heap = LIVE.load(Relaxed);
     let mut peak_heap = 0; let mut rss = before_os["Rss"]; let mut pss = before_os["Pss"];
+    let mut outcomes = Vec::with_capacity(cases.len());
     for case in cases {
         for iteration in 0..iterations {
-            operation(case, run, true, &mut stats, &mut outputs)?;
+            let failure = operation(case, run, true, &mut stats, &mut outputs)?;
             peak_heap = peak_heap.max(PEAK.load(Relaxed).saturating_sub(before_heap));
             if iteration == 0 {
                 let sample = smaps()?; rss = rss.max(sample["Rss"]); pss = pss.max(sample["Pss"]);
+                outcomes.push(failure);
             }
         }
     }
@@ -161,9 +183,17 @@ fn run_workload(cases: &[Prepared], run: &Run, manifest: &Value, cg: &Path) -> R
     let charge = cg_value(cg, "memory.current")?;
     charge_peak_file.seek(SeekFrom::Start(0))?;
     let mut peak_text = String::new(); charge_peak_file.read_to_string(&mut peak_text)?;
+    // After every measurement: split a request `finish` refusal into its two halves.
+    for (case, failure) in cases.iter().zip(&mut outcomes) {
+        if let Some(failure) = failure.as_mut().filter(|f| f.stage == "request_finish") {
+            failure.stage = if passes_own_fence(case, run)? { "destination_fence" } else { "client_validate" };
+        }
+    }
+    let outcomes = outcomes.iter().map(outcome).collect();
     Ok((stats, Observed { start: start_os, before: before_os, after: after_os, rss, pss,
         faults: (faults.0 - before_faults.0, faults.1 - before_faults.1),
-        heap: (before_heap, after_heap, peak_heap), charge: (before_charge, charge, peak_text.trim().parse()?) }))
+        heap: (before_heap, after_heap, peak_heap), charge: (before_charge, charge, peak_text.trim().parse()?) },
+        outcomes))
 }
 
 fn values(s: &mut Samples, o: &Observed, store: &ck_stream::Store) -> BTreeMap<String, f64> {
@@ -201,12 +231,13 @@ fn values(s: &mut Samples, o: &Observed, store: &ck_stream::Store) -> BTreeMap<S
 fn measure(row: &Value, manifest: &Value, cg: &Path, store: &ck_stream::Store) -> Result<(Value, Value)> {
     let (client, upstream) = (protocol(row, "client_protocol")?, protocol(row, "upstream_protocol")?);
     let selected = row["event_kinds"][0].as_str().ok_or("missing selected kind")?;
-    let cases: Vec<Prepared> = row["cases"].as_array().ok_or("missing cases")?.iter()
-        .map(|case| Prepared::new(&case["input"], selected)).collect::<Result<_>>()?;
+    let rows = row["cases"].as_array().ok_or("missing cases")?;
+    let cases: Vec<Prepared> = rows.iter()
+        .map(|case| Prepared::new(&case["input"], selected, client)).collect::<Result<_>>()?;
     if cases.is_empty() { return Err("empty workload".into()); }
     let limit = store.limits().max_event_bytes as u64;
     let run = Run { store, client, upstream, selected, limit };
-    let (mut stats, observed) = run_workload(&cases, &run, manifest, cg)?;
+    let (mut stats, observed, outcomes) = run_workload(&cases, &run, manifest, cg)?;
     let mut values = values(&mut stats, &observed, store);
     let mut metrics = serde_json::Map::new();
     for (name, spec) in manifest["metrics"].as_object().ok_or("missing metric definitions")? {
@@ -226,7 +257,11 @@ fn measure(row: &Value, manifest: &Value, cg: &Path, store: &ck_stream::Store) -
         "charge_after": o.charge.1, "charge_peak": o.charge.2, "pool": {
             "capacity_frames": store.capacity_frames(), "backed_frames": store.backed_frames(),
             "used_frames_after": store.used_frames()},
-        "no_output_completions": stats.no_output, "cpu_clock_overhead_ns": CLOCK_OVERHEAD.load(Relaxed)});
+        "no_output_completions": stats.no_output, "cpu_clock_overhead_ns": CLOCK_OVERHEAD.load(Relaxed),
+        // Content-free per-case outcome, keyed by the case's index in the pinned fixture file.
+        "cases": rows.iter().zip(outcomes).map(|(case, mut outcome)| {
+            outcome["index"] = case["index"].clone(); outcome
+        }).collect::<Vec<_>>()});
     Ok((Value::Object(metrics), evidence))
 }
 

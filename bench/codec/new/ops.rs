@@ -1,7 +1,7 @@
 //! One boundary operation per fixture case, timed over the same regions as `baseline.rs`.
 use crate::codec::{BodyMode, Operation};
 use crate::harness::{ALLOCS, BYTES, COUNT, LIVE, PEAK, Result, TRACK, cpu, cpu_since};
-use crate::protocols::{Protocol, RequestIn, ResponseIn, ResponseOut};
+use crate::protocols::{Failure, Protocol, RequestIn, ResponseIn, ResponseOut, at};
 use ck_stream::{Read, Reader, ScratchLease, Store, Terminal, Writer};
 use serde_json::Value;
 use std::{hint::black_box, sync::atomic::Ordering::Relaxed, task::Poll, time::Instant};
@@ -22,6 +22,8 @@ pub struct Prepared {
     stream: bool,
     include_usage: bool,
     upstream: BodyMode,
+    model: String,
+    finalize: bool,
 }
 
 /// Same selection as `baseline.rs` and `gate.py`: a line's external wire kind.
@@ -67,8 +69,9 @@ fn upstream_body(input: Vec<u8>) -> (BodyMode, Vec<u8>) {
 }
 
 /// The corpus keeps the routed model beside the body, as the old `RequestCtx` received it.
-/// Chat and Anthropic clients send it in the body, which the new ingress validates, so a
-/// JSON object without `model` gets the fixture's model as its first member.
+/// Chat, Anthropic and Responses clients send it in the body, which the new ingress validates,
+/// so a JSON object without `model` gets the fixture's model as its first member. Gemini takes
+/// it from the URL, which `RequestIn::new` receives instead.
 fn with_model(input: Vec<u8>, model: &str) -> Vec<u8> {
     let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&input) else { return input };
     let Some(open) = input.iter().position(|b| *b == b'{').filter(|_| !map.contains_key("model")) else {
@@ -81,7 +84,7 @@ fn with_model(input: Vec<u8>, model: &str) -> Vec<u8> {
 }
 
 impl Prepared {
-    pub fn new(f: &Value, selected_kind: &str) -> Result<Self> {
+    pub fn new(f: &Value, selected_kind: &str, client: Protocol) -> Result<Self> {
         let raw = f["bytes"].as_bool().unwrap_or(false);
         let mode = match f["path"].as_str().ok_or("missing mode")? {
             "request" | "request_compat" | "request_envelope" => Mode::Request,
@@ -102,13 +105,15 @@ impl Prepared {
         let include_usage = original["stream_options"]["include_usage"].as_bool().unwrap_or(false);
         let mut input = bytes(&f["input"], raw);
         let mut upstream = BodyMode::Buffered;
+        let model = f["model"].as_str().unwrap_or_default().to_owned();
         match mode {
+            Mode::Request if client == Protocol::Gemini => {}
             Mode::Request => input = with_model(input, f["model"].as_str().ok_or("missing model")?),
             Mode::Buffered => (upstream, input) = upstream_body(input),
             Mode::Stream | Mode::Count => {}
         }
         Ok(Self { mode, input, lines, selected, stream: f["stream"].as_bool().unwrap_or(false),
-            include_usage, upstream })
+            include_usage, upstream, model, finalize: f["finalize"].as_bool().unwrap_or(false) })
     }
 }
 
@@ -198,6 +203,7 @@ fn region<T>(count: bool, work: impl FnOnce() -> T) -> (T, Cost) {
     (value, Cost { cpu, allocations: ALLOCS.load(Relaxed) - allocations, bytes: BYTES.load(Relaxed) - bytes })
 }
 
+#[derive(Clone, Copy)]
 pub struct Run<'a> {
     pub store: &'a Store,
     pub client: Protocol,
@@ -206,6 +212,9 @@ pub struct Run<'a> {
     pub limit: u64,
 }
 
+const UP: &str = "upstream_decode";
+const DOWN: &str = "client_encode";
+
 /// Upstream response ingress feeding client response egress through the writer's canonical log.
 struct Pipe {
     ingress: Option<ResponseIn>,
@@ -213,31 +222,46 @@ struct Pipe {
     reader: Reader,
     ingress_failed: bool,
     egress_failed: bool,
+    failure: Option<Failure>,
 }
 
 impl Pipe {
     fn new(run: &Run, owner: &mut Writer, operation: Operation, modes: (BodyMode, BodyMode), usage: bool)
            -> Result<Self> {
         let reader = run.store.reader(owner.id(), 0)?;
-        let ingress = ResponseIn::new(run.upstream, owner, run.store, operation, modes.0, run.limit).ok();
-        let egress = ResponseOut::new(run.client, owner, operation, modes.1, usage).ok();
-        let (ingress_failed, egress_failed) = (ingress.is_none(), egress.is_none());
-        Ok(Self { ingress, egress, reader, ingress_failed, egress_failed })
+        let ingress = ResponseIn::new(run.upstream, owner, run.store, operation, modes.0, run.limit);
+        let egress = ResponseOut::new(run.client, owner, operation, modes.1, usage);
+        let mut pipe = Self { ingress: None, egress: None, reader, ingress_failed: false, egress_failed: false,
+                              failure: None };
+        match ingress { Ok(codec) => pipe.ingress = Some(codec), Err(e) => pipe.ingress_failed = pipe.fail(UP, e) }
+        match egress { Ok(codec) => pipe.egress = Some(codec), Err(e) => pipe.egress_failed = pipe.fail(DOWN, e) }
+        Ok(pipe)
+    }
+    /// Keep the first failure: later ones follow from the stream it terminated.
+    fn fail(&mut self, stage: &'static str, error: crate::codec::Error) -> bool {
+        self.failure.get_or_insert(Failure { stage, error });
+        true
+    }
+    fn check(&mut self, stage: &'static str, result: crate::codec::Result<()>) -> bool {
+        result.err().is_some_and(|error| self.fail(stage, error))
     }
     /// A failed codec stops consuming input, as the boundary terminates that stream.
     fn feed(&mut self, owner: &mut Writer, bytes: &[u8], outputs: &mut Vec<Chunk>) {
         if let Some(ingress) = self.ingress.as_mut().filter(|_| !self.ingress_failed) {
-            self.ingress_failed = ingress.advance(owner, bytes).is_err();
+            let result = ingress.advance(owner, bytes);
+            self.ingress_failed = self.check(UP, result);
         }
         self.drain(owner, outputs);
     }
     fn eof(&mut self, owner: &mut Writer, outputs: &mut Vec<Chunk>) {
         if let Some(ingress) = self.ingress.as_mut().filter(|_| !self.ingress_failed) {
-            self.ingress_failed = ingress.finish(owner).is_err();
+            let result = ingress.finish(owner);
+            self.ingress_failed = self.check(UP, result);
         }
         self.drain(owner, outputs);
         if let Some(egress) = self.egress.as_mut().filter(|_| !self.egress_failed) {
-            self.egress_failed = egress.finish().is_err();
+            let result = egress.finish();
+            self.egress_failed = self.check(DOWN, result);
         }
     }
     fn drain(&mut self, owner: &mut Writer, outputs: &mut Vec<Chunk>) {
@@ -245,7 +269,7 @@ impl Pipe {
             let (Read::Record(lease), Some(egress)) = (read, self.egress.as_mut()) else { continue };
             if !self.egress_failed {
                 let pushed = egress.advance(owner, lease, |part| { outputs.push(Chunk::Lease(part)); Ok(()) });
-                self.egress_failed = pushed.is_err();
+                self.egress_failed = self.check(DOWN, pushed);
             }
         }
     }
@@ -262,7 +286,7 @@ fn release(mut writer: Writer) {
 }
 
 fn stream(case: &Prepared, run: &Run, measured: bool, stats: &mut Samples, outputs: &mut Vec<Chunk>,
-          t: &mut Timing) -> Result<()> {
+          t: &mut Timing) -> Result<Option<Failure>> {
     // Stream construction, EOF validation and teardown are completion cost, as in baseline.rs.
     let (built, cost) = region(false, || -> Result<_> {
         let mut writer = run.store.create()?;
@@ -280,35 +304,42 @@ fn stream(case: &Prepared, run: &Run, measured: bool, stats: &mut Samples, outpu
         outputs.clear();
         TRACK.store(measured, Relaxed);
     }
-    let ((), cost) = region(false, || pipe.eof(&mut writer, outputs));
+    // The old pair's `finalize_tool_input` call corresponds to the codecs' end-of-input finish.
+    let finalize = case.finalize && run.selected == "finalize";
+    let ((), cost) = region(measured && finalize, || pipe.eof(&mut writer, outputs));
     t.completion_cpu += cost.cpu;
     TRACK.store(false, Relaxed);
     if measured {
-        stats.consume(outputs, t);
+        if finalize { stats.event(true, true, cost, 0, outputs, t); } else { stats.consume(outputs, t); }
         stats.storage(run.store, &writer);
         pipe.errors(stats);
     }
     outputs.clear();
     TRACK.store(measured, Relaxed);
+    let failure = pipe.failure.take();
     let ((), cost) = region(false, || { drop(pipe); release(writer) });
     t.completion_cpu += cost.cpu;
     if case.lines.is_empty() && run.selected == "empty-stream" && measured { stats.events += 1; }
-    Ok(())
+    Ok(failure)
 }
 
-fn request(case: &Prepared, run: &Run, owner: &mut Writer, outputs: &mut Vec<Chunk>) -> bool {
-    let result = RequestIn::new(run.client, owner, run.store, run.limit).and_then(|mut ingress| {
-        ingress.advance(owner, &case.input)?;
-        ingress.encode(owner, run.upstream, case.stream)
-    });
+fn request(case: &Prepared, run: &Run, owner: &mut Writer, outputs: &mut Vec<Chunk>) -> Option<Failure> {
+    let result = RequestIn::new(run.client, owner, run.store, &case.model, run.limit).map_err(at("client_decode"))
+        .and_then(|mut ingress| {
+            ingress.advance(owner, &case.input).map_err(at("client_decode"))?;
+            ingress.encode(owner, run.upstream, case.stream)
+        });
     match result {
-        Ok(lease) => { outputs.push(Chunk::Lease(lease)); false }
-        Err(error) => { outputs.push(Chunk::Refused(format!("REFUSED:{error}").into_bytes())); true }
+        Ok(lease) => { outputs.push(Chunk::Lease(lease)); None }
+        Err(failure) => {
+            outputs.push(Chunk::Refused(format!("REFUSED:{}", failure.error).into_bytes()));
+            Some(failure)
+        }
     }
 }
 
 fn response(case: &Prepared, run: &Run, owner: &mut Writer, outputs: &mut Vec<Chunk>,
-            stats: &mut Samples, measured: bool) -> Result<bool> {
+            stats: &mut Samples, measured: bool) -> Result<(bool, Option<Failure>)> {
     let operation = if case.mode == Mode::Count { Operation::CountTokens } else { Operation::Generate };
     let mut pipe = Pipe::new(run, owner, operation, (case.upstream, BodyMode::Buffered), case.include_usage)?;
     pipe.feed(owner, &case.input, outputs);
@@ -316,21 +347,33 @@ fn response(case: &Prepared, run: &Run, owner: &mut Writer, outputs: &mut Vec<Ch
     if measured { pipe.errors(stats); }
     let refused = outputs.is_empty() && (pipe.ingress_failed || pipe.egress_failed);
     if refused { outputs.push(Chunk::Refused(b"REFUSED:boundary".to_vec())); }
-    Ok(refused)
+    Ok((refused, pipe.failure.take()))
+}
+
+/// Untimed: whether the request passes with its own protocol as the destination. A request
+/// that does fails only another destination's fence, so the input itself is valid.
+pub fn passes_own_fence(case: &Prepared, run: &Run) -> Result<bool> {
+    let own = Run { upstream: run.client, ..*run };
+    let mut writer = run.store.create()?;
+    let mut outputs = Vec::new();
+    let failure = request(case, &own, &mut writer, &mut outputs);
+    outputs.clear();
+    release(writer);
+    Ok(failure.is_none())
 }
 
 /// Request, buffered response and count: one complete boundary operation is the event.
 fn single(case: &Prepared, run: &Run, measured: bool, stats: &mut Samples, outputs: &mut Vec<Chunk>,
-          t: &mut Timing) -> Result<()> {
+          t: &mut Timing) -> Result<Option<Failure>> {
     let (done, work) = region(measured, || -> Result<_> {
         let mut writer = run.store.create()?;
-        let refused = match case.mode {
-            Mode::Request => request(case, run, &mut writer, outputs),
+        let (refused, failure) = match case.mode {
+            Mode::Request => { let failure = request(case, run, &mut writer, outputs); (failure.is_some(), failure) }
             _ => response(case, run, &mut writer, outputs, stats, measured)?,
         };
-        Ok((writer, refused))
+        Ok((writer, refused, failure))
     });
-    let (writer, refused) = done?;
+    let (writer, refused, failure) = done?;
     TRACK.store(false, Relaxed);
     let encoded = outputs.iter().map(|out| out.len() as u64).sum();
     if measured {
@@ -348,19 +391,20 @@ fn single(case: &Prepared, run: &Run, measured: bool, stats: &mut Samples, outpu
     t.completion_cpu += cost.cpu;
     TRACK.store(false, Relaxed);
     if measured { stats.account(cost, case.input.len(), encoded); }
-    Ok(())
+    Ok(failure)
 }
 
+/// Runs one case and returns its first boundary failure, or `None` for a successful translation.
 pub fn operation(case: &Prepared, run: &Run, measured: bool, stats: &mut Samples,
-                 outputs: &mut Vec<Chunk>) -> Result<()> {
+                 outputs: &mut Vec<Chunk>) -> Result<Option<Failure>> {
     let mut t = Timing { start: Instant::now(), first: None, previous: None, completion_cpu: 0 };
     PEAK.store(LIVE.load(Relaxed), Relaxed);
     TRACK.store(measured, Relaxed);
-    if case.mode == Mode::Stream {
-        stream(case, run, measured, stats, outputs, &mut t)?;
+    let failure = if case.mode == Mode::Stream {
+        stream(case, run, measured, stats, outputs, &mut t)?
     } else {
-        single(case, run, measured, stats, outputs, &mut t)?;
-    }
+        single(case, run, measured, stats, outputs, &mut t)?
+    };
     TRACK.store(false, Relaxed);
     let elapsed = t.start.elapsed().as_nanos() as u64;
     if measured {
@@ -368,5 +412,5 @@ pub fn operation(case: &Prepared, run: &Run, measured: bool, stats: &mut Samples
         if t.first.is_none() { stats.no_output += 1; }
         stats.first.push(t.first.unwrap_or(0)); stats.completion.push(elapsed);
     }
-    Ok(())
+    Ok(failure)
 }

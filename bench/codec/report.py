@@ -39,6 +39,17 @@ def main():
     print(f"Status: {summary['status']}; failed metrics: {summary.get('failed_metrics', 'n/a')}\n")
     order = sorted(by_workload, key=lambda key: (rows[key]["protocol"], rows[key]["direction"],
                                                   rows[key]["mode"], rows[key]["event_kinds"][0]))
+    print("| Pair | Direction | Mode | Kind | Cases | Old cpu ns/event | New cpu ns/event | New/old | "
+          "Old allocs/event | New allocs/event |")
+    print("| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for key in order:
+        row, metric = rows[key], {c["metric"]: c for c in by_workload[key]}
+        cpu, allocs = metric["cpu_ns_per_event"], metric["allocations_per_event"]
+        ratio = f"{Decimal(cpu['new_median']) / Decimal(cpu['old_median']):.1f}x" if cpu["old_median"] else "n/a"
+        print(f"| {row['protocol']} | {row['direction']} | {row['mode']} | `{row['event_kinds'][0]}` | "
+              f"{len(row['cases'])} | {cpu['old_median']} | {cpu['new_median']} | {ratio} | "
+              f"{allocs['old_median']} | {allocs['new_median']} |")
+    print()
     for key in order:
         row, comparisons = rows[key], by_workload[key]
         failed = [c["metric"] for c in comparisons if not c["pass"]]

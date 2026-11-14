@@ -1,6 +1,6 @@
 # External codec workload contract v1
 
-`bench/codec-gate.sh OLD_CODEC NEW_CODEC OUT` compares two executable workload harnesses, not gateway binaries. `build-baseline.sh` builds a real instrumented harness against the pinned old pair implementation. `build-new.sh` builds the new boundary-codec harness; it covers Chat and Anthropic only, so the full gate exits 2 until the other protocols merge.
+`bench/codec-gate.sh OLD_CODEC NEW_CODEC OUT` compares two executable workload harnesses, not gateway binaries. `build-baseline.sh` builds a real instrumented harness against the pinned old pair implementation. `build-new.sh` builds the new boundary-codec harness; it covers Chat, Anthropic, Responses and Gemini, and has no Interactions or Antigravity codec, so the full gate exits 2.
 
 ## Run the gate
 
@@ -181,13 +181,27 @@ The builder refuses uncommitted changes to its inputs (`crates/ck-stream`, the S
 
 The new harness runs each request row through the client protocol's request ingress and the upstream protocol's request egress, and each response row through the upstream response ingress and the client response egress, over one ck-stream store per worker process. Each operation uses a fresh writer and ends it with `Terminal::Gone`, the release-at-completion retention. Its launcher reuses `baseline_launcher.worker`, so cgroup accounting is identical. The corpus keeps Go-era input conventions, and the harness adapts only these:
 
-- A request object without `model` gets the fixture's `model` as its first member; the old pair received it in `RequestCtx`.
+- A Chat, Anthropic or Responses request object without `model` gets the fixture's `model` as its first member; the old pair received it in `RequestCtx`. Gemini request ingress receives the fixture's `model` as its URL model.
+- `codex` and `openai-response` both map to the Responses codec, with destination `responses`.
+- An Anthropic destination fills a missing `max_tokens` with 32000, standing in for the per-model default production resolves (owner ruling 2026-11-15).
+- A `finalize` row times the stream's end-of-input call, which finishes response ingress and egress, as the old pair's `finalize_tool_input`.
 - Each recorded SSE line gets its line terminator, and every line except `event:`, `id:` and `retry:` also ends its event. A `non_stream` body recorded as SSE lines is read by streaming upstream ingress and buffered client egress.
 - A refused request emits `REFUSED:<error>`, as the baseline does; a buffered response or count that failed without output emits `REFUSED:boundary`.
 
-A workload naming a protocol without a merged codec exits nonzero. To add one, extend `Protocol` and its role constructors in `new/protocols.rs` and `CODEC_MODULES` in `build_new.py`.
+A workload naming a protocol without a merged codec exits nonzero. To add one, extend `Protocol` and its role constructors in `new/protocols.rs`, and `CODEC_MODULES` and `INPUT_TREES` in `build_new.py`.
 
-Until every protocol is covered, `partial.py --protocols openai,claude OLD NEW OUT` runs the gate's own manifest, describe checks, noise band, rounds and thresholds over the workloads whose client and upstream are both listed. Its summary is marked `acceptance_evidence: false`; it never replaces the gate. `report.py OUT` renders any gate or partial summary as Markdown tables of every metric.
+Each workload's evidence file lists every case's outcome on its first measured iteration, keyed by the case's index in the pinned fixture, with the first refusing stage and the codec error kind. Request stages are `client_decode` (ingress), `client_validate` and `destination_fence` (both inside `finish`), and `upstream_encode`; response stages are `upstream_decode` and `client_encode`. A request refused in `finish` is rerun after measurement with its own protocol as the destination: `destination_fence` if that passes, `client_validate` if not. Outcomes:
+
+- `ok`: the translation succeeded.
+- `invalid_input`: `Utf8`, `Json`, `DuplicateKey` or `Truncated` at any stage, or `Schema` while decoding or validating the source.
+- `unsupported`: `Unsupported` at any stage, or `Schema` at `destination_fence`, `upstream_encode` or `client_encode`, where the input already decoded and validated.
+- `other_error`: any other codec error.
+
+The outcome is the codec's verdict: a codec stricter than the provider API reports valid input as `invalid_input`.
+
+Until every protocol is covered, `partial.py --protocols openai,claude OLD NEW OUT` runs the gate's own manifest, describe checks, noise band, rounds and thresholds over the workloads whose client and upstream are both listed. Its summary is marked `acceptance_evidence: false`; it never replaces the gate. `report.py OUT` renders any gate or partial summary as Markdown tables of every metric. `outcomes.py OUT` tabulates the case outcomes per pair and role, and lists refusal causes by stage and error kind.
+
+Timing over all cases mixes successful translations with early refusals. To time only successful translations, run `partial.py` once, then again with `--ok-only FIRST_OUT` before `OLD`: each workload keeps the cases whose outcome was `ok` in the first run, and workloads left empty are dropped, on both sides.
 
 ## Run synthetic controls
 

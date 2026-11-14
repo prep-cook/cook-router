@@ -15,8 +15,11 @@ BASELINE_REVISION = "b518060ea1e43ef4b266591986ca92321e6289b5"
 # same module files its integration tests include. Extension: list new protocol modules here.
 CODEC_MODULES = {"codec": "crates/ck-translate/src/codec/mod.rs",
                  "boundary": "crates/ck-translate/src/boundary.rs",
-                 "anthropic": "crates/ck-translate/src/anthropic/mod.rs"}
-INPUT_TREES = ("crates/ck-stream", "crates/ck-translate/src/codec", "crates/ck-translate/src/anthropic")
+                 "anthropic": "crates/ck-translate/src/anthropic/mod.rs",
+                 "responses": "crates/ck-translate/src/responses/mod.rs",
+                 "gemini": "crates/ck-translate/src/gemini/boundary.rs"}
+INPUT_TREES = ("crates/ck-stream", "crates/ck-translate/src/codec", "crates/ck-translate/src/anthropic",
+               "crates/ck-translate/src/responses", "crates/ck-translate/src/gemini")
 HARNESS = ("bench/codec/new/harness.rs", "bench/codec/new/ops.rs", "bench/codec/new/protocols.rs",
            "bench/codec/new_launcher.py", "bench/codec/baseline_launcher.py", "bench/codec/build_new.py")
 
