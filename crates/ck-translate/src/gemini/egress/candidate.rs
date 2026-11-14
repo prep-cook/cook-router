@@ -195,6 +195,33 @@ impl Egress {
         });
         Ok(())
     }
+    /// Writes a native SSE event of the source in its place in the client stream.
+    fn native(
+        &mut self,
+        owner: &mut Writer,
+        event: &Document,
+        output: &mut impl FnMut(ScratchLease) -> Result<()>,
+    ) -> Result<()> {
+        let root = event.root();
+        // An event whose body wrote nothing yet ends here as a fields-only event, so
+        // each source event keeps its own id.
+        if self.open_event {
+            output(encode::scratch(owner, |e| e.bytes(b"\n"))?)?;
+        }
+        let text = super::super::is(event, root, "format", "text")?;
+        // Held parts precede an event under another name, as they did in the source.
+        // Fields and comments of a body event stay open for the data that follows, so
+        // a held part still meets its finish.
+        for slot in (0..self.choices.len()).filter(|_| text) {
+            if self.choices[slot].part.is_some() {
+                let fields = !self.choices[slot].finished;
+                self.flush(owner, slot, fields, output)?;
+            }
+        }
+        output(encode::scratch(owner, |e| sse_event(event, e))?)?;
+        self.open_event = !text;
+        Ok(())
+    }
     /// Restores the response and candidate members the Gemini source had no mapping for.
     pub(super) fn opaque(
         &mut self,
@@ -208,16 +235,7 @@ impl Egress {
             let sse = super::super::is(event, root, "name", "gemini.sse")?
                 || super::super::is(event, root, "name", "gemini.event")?;
             if sse && self.framing == Framing::Sse {
-                // Held parts precede the native event, as they did in the source.
-                for slot in 0..self.choices.len() {
-                    if self.choices[slot].part.is_some() {
-                        let fields = !self.choices[slot].finished;
-                        self.flush(owner, slot, fields, output)?;
-                    }
-                }
-                output(encode::scratch(owner, |e| sse_event(event, e))?)?;
-                self.open_event = !super::super::is(event, root, "format", "text")?;
-                return Ok(());
+                return self.native(owner, event, output);
             }
             (self.diagnostic)(if sse {
                 Diagnostic::SseMetadata

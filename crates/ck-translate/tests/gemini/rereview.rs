@@ -1,4 +1,4 @@
-//! Regressions from the second review of the Gemini codec, one input per finding.
+//! Regressions from the second and third reviews of the Gemini codec, one input per finding.
 use super::*;
 use gemini::response::Framing;
 
@@ -247,4 +247,84 @@ fn chat_allowed_tools_choice_is_refused_at_the_gemini_fence() {
         .unwrap();
     let result = ingress.finish(&mut m.writer, &gemini::request::GeminiCapability);
     assert!(matches!(result, Err(codec::Error::Unsupported)));
+}
+
+/// Splits streamed SSE output into events, asserting that each ends with one blank line and
+/// carries at most one `id` line.
+fn sse_framed(out: &[u8]) -> Vec<String> {
+    let raw = String::from_utf8(out.to_vec()).unwrap();
+    assert!(
+        raw.ends_with("\n\n") && !raw.contains("\n\n\n") && !raw.starts_with('\n'),
+        "{raw:?}"
+    );
+    let events: Vec<String> = raw[..raw.len() - 2].split("\n\n").map(str::to_owned).collect();
+    for event in &events {
+        assert!(event.lines().filter(|l| l.starts_with("id:")).count() <= 1, "{raw}");
+    }
+    events
+}
+
+/// Comments and ordinary fields join the open event without writing the held part, so the
+/// content and the finish still reach one record.
+#[test]
+fn sse_fields_keep_content_and_finish_together() {
+    let hi = json!({"candidates":[{"content":{"parts":[{"text":"hi"}]}}]});
+    let together =
+        json!({"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}]});
+    let cases = [
+        (
+            format!("data: {hi}\n\n: finish\ndata: {}\n\n", json!({"candidates":[{"finishReason":"STOP"}]})),
+            together.clone(),
+        ),
+        (
+            concat!(
+                "id: first\nevent: message\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]},\"safetyRatings\":[]}]}\n\n",
+                "id: final\nevent: message\ndata: {\"candidates\":[{\"safetyRatings\":[],\"finishReason\":\"STOP\"}]}\n\n",
+            )
+            .to_owned(),
+            json!({"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"hi"}]},"safetyRatings":[],"finishReason":"STOP"}]}),
+        ),
+        (
+            concat!(
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]},\"finishReason\":\"STOP\"}]}\n\n",
+                "id: update\nevent: message\ndata: {\"responseId\":\"r2\"}\n\n",
+            )
+            .to_owned(),
+            json!({"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],"responseId":"r2"}),
+        ),
+    ];
+    for (wire, record) in cases {
+        let (out, _) = response(wire.as_bytes(), Framing::Sse, Framing::Sse, Operation::Generate);
+        let framed = sse_framed(&out);
+        assert_eq!(events(&out), vec![record], "{framed:?}");
+    }
+}
+
+/// A source event whose body wrote nothing is closed as a fields-only event before the next
+/// event's fields, so each event keeps its own id.
+#[test]
+fn sse_metadata_events_keep_their_boundaries() {
+    let usage = "data: {\"usageMetadata\":{\"promptTokenCount\":1}}\n\n";
+    let text = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let wire = format!("id: meta\nevent: message\n{usage}id: text\nevent: message\n{text}");
+    let (out, _) = response(wire.as_bytes(), Framing::Sse, Framing::Sse, Operation::Generate);
+    let framed = sse_framed(&out);
+    assert_eq!(framed[0], "id: meta\nevent: message", "{framed:?}");
+    assert!(framed[1].starts_with("id: text\nevent: message\ndata: {"), "{framed:?}");
+    assert_eq!(framed.len(), 2, "{framed:?}");
+
+    let wire = format!(
+        "id: meta\nretry: 1500\nevent: message\n{usage}id: future\nevent: future_event\ndata: marker\n\n{text}"
+    );
+    let (out, _) = response(wire.as_bytes(), Framing::Sse, Framing::Sse, Operation::Generate);
+    let framed = sse_framed(&out);
+    assert_eq!(
+        framed[..2],
+        [
+            "id: meta\nretry: 1500\nevent: message",
+            "id: future\nevent: future_event\ndata: marker"
+        ],
+        "{framed:?}"
+    );
+    assert!(framed[2].starts_with("data: {") && framed.len() == 3, "{framed:?}");
 }
