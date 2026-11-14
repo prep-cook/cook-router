@@ -82,7 +82,8 @@ impl Egress {
     }
     /// Sets candidate member `name`: a member held for the choice's next streamed record, or a
     /// member of the buffered candidate, replacing an earlier value. A repeated member of an
-    /// unfinished streamed choice first writes the part it followed.
+    /// unfinished streamed choice first writes the part it followed when a later part is
+    /// already open; without one, the held part keeps it so the last record carries content.
     pub(super) fn candidate_field(
         &mut self,
         owner: &mut Writer,
@@ -97,6 +98,7 @@ impl Egress {
         let choice = &self.choices[slot];
         if !choice.finished
             && choice.part.is_some()
+            && self.blocks.iter().any(|b| b.choice == choice.index && b.held)
             && let Some(fields) = &choice.fields
             && fields.member(fields.root(), name)?.is_some()
         {
