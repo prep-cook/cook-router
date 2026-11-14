@@ -127,3 +127,38 @@ fn chat_controls_keep_their_meaning() {
     let unknown = json!({"model":"m","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"grammar"}});
     assert!(matches!(validate(&unknown), Err(codec::Error::Unsupported)));
 }
+
+/// Each usage update keeps only the merged snapshot: a long run of updates stays within the
+/// default stream limits (it failed near 5,149 updates when every snapshot was retained).
+#[test]
+fn usage_updates_keep_one_snapshot() {
+    let directory = std::env::temp_dir().join(format!("ck-gemini-{}", uuid::Uuid::new_v4()));
+    let mut config = ck_stream::Config::new(directory.clone());
+    config.workers = 1;
+    let mut store =
+        ck_stream::Store::with_clock(config, std::sync::Arc::new(ck_stream::ManualClock::default())).unwrap();
+    let mut writer = store.create().unwrap();
+    let mut reader = store.reader(writer.id(), 0).unwrap();
+    let mut ingress = gemini::response::Ingress::with_framing(
+        &mut writer,
+        identity(Direction::Response),
+        Operation::Generate,
+        Framing::Sse,
+        1 << 30,
+    )
+    .unwrap();
+    let rows = [json!({"candidates":[{"index":0,"content":{"parts":[{"text":"t"}]}}]})]
+        .into_iter()
+        .chain((0..8000).map(|i| json!({"usageMetadata":{"candidatesTokenCount":i}})))
+        .chain([json!({"candidates":[{"index":0,"finishReason":"STOP"}]})]);
+    for row in rows {
+        ingress
+            .advance(&mut writer, format!("data: {row}\n\n").as_bytes())
+            .unwrap();
+        while let Poll::Ready(Some(_)) = reader.try_next() {}
+    }
+    ingress.finish(&mut writer).unwrap();
+    drop((ingress, reader, writer));
+    store.shutdown().unwrap();
+    std::fs::remove_dir_all(&directory).unwrap();
+}

@@ -32,7 +32,8 @@ impl State {
             }
         }
         emit(&mut self.emitter, owner, &next, false)?;
-        self.usage = Some(next);
+        // A fresh copy drops the absorbed snapshot's detached nodes and backing.
+        self.usage = Some(super::super::mapped(owner, |e| next.write(next.root(), e))?);
         Ok(())
     }
 }
