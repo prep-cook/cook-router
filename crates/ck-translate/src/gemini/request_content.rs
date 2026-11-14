@@ -102,6 +102,8 @@ fn normalize_part(owner: &mut Writer, doc: &mut Document, part: usize, place: Pl
         "id",
         "tool_call_id",
         "result",
+        "arguments_format",
+        "function",
     ] {
         if let Some(n) = doc.remove(part, key)? {
             preserve(owner, doc, part, n, None)?;

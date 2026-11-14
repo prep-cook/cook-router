@@ -96,3 +96,14 @@ fn null_stop_stays_unset() {
     let stop = &out["generationConfig"]["stopSequences"];
     assert!(stop.is_null(), "{out}");
 }
+
+/// Call part members named like the canonical call members return to Gemini unchanged.
+#[test]
+fn call_part_members_named_like_canonical_ones_survive() {
+    for extra in [json!({"arguments_format":17}), json!({"function":{"future":18}})] {
+        let mut part = json!({"functionCall":{"name":"f","args":{}}});
+        part.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let input = json!({"contents":[{"role":"model","parts":[part]}]});
+        assert_eq!(request(&input, Operation::Generate).0, input);
+    }
+}
