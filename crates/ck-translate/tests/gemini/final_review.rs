@@ -162,3 +162,38 @@ fn usage_updates_keep_one_snapshot() {
     store.shutdown().unwrap();
     std::fs::remove_dir_all(&directory).unwrap();
 }
+
+/// A supplied createTime becomes the canonical creation time in Unix seconds; its exact
+/// spelling stays in provenance.
+#[test]
+fn create_time_becomes_unix_seconds() {
+    for (time, seconds) in [
+        ("2026-11-15T00:00:00Z", 1_794_700_800),
+        ("2026-11-15T00:00:00.123456789+01:30", 1_794_695_400),
+    ] {
+        let body = json!({"createTime":time,"candidates":[{"finishReason":"STOP"}]});
+        let (out, canonical) = response(
+            &serde_json::to_vec(&body).unwrap(),
+            Framing::Json,
+            Framing::Json,
+            Operation::Generate,
+        );
+        let start = canonical
+            .iter()
+            .find(|v| v["x_ck"]["source"]["timestamp"].is_string())
+            .unwrap();
+        assert_eq!(start["created"], seconds, "{start}");
+        assert!(
+            start["x_ck"]
+                .get("synthetic")
+                .is_none_or(|s| !s.as_array().unwrap().contains(&json!("created")))
+        );
+        assert!(
+            canonical
+                .iter()
+                .filter(|v| v.get("created").is_some())
+                .all(|v| v["created"] == seconds)
+        );
+        assert_eq!(serde_json::from_slice::<Value>(&out).unwrap()["createTime"], time);
+    }
+}

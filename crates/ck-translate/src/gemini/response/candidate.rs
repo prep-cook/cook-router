@@ -86,6 +86,10 @@ impl State {
         let root = doc.root();
         let base = self.base_fields(owner, doc)?;
         let synthetic = self.synthetic;
+        let created = match doc.member(root, "createTime")? {
+            Some(n) => unix_seconds(doc, n)?.is_some(),
+            None => false,
+        };
         self.emitter.emit(
             owner,
             Kind::ResponseStart,
@@ -103,7 +107,7 @@ impl State {
                     doc.write(n, e)?;
                 }
                 e.bytes(b"}")?;
-                super::synthetic(synthetic, true, e)
+                super::synthetic(synthetic, !created, e)
             },
         )?;
         self.base = Some(base);
@@ -114,6 +118,10 @@ impl State {
     fn base_fields(&mut self, owner: &mut Writer, doc: &Document) -> Result<Document> {
         let root = doc.root();
         let supplied = [doc.member(root, "responseId")?, doc.member(root, "modelVersion")?];
+        let time = match doc.member(root, "createTime")? {
+            Some(n) => unix_seconds(doc, n)?,
+            None => None,
+        };
         let previous = self.base.as_ref();
         let base = super::super::mapped(owner, |e| {
             for ((canonical, node), fallback) in ["id", "model"]
@@ -133,7 +141,13 @@ impl State {
                     (None, None) => e.string(fallback)?,
                 }
             }
-            e.bytes(b",\"created\":0}")
+            e.bytes(b",\"created\":")?;
+            match (time, previous) {
+                (Some(time), _) => e.unsigned(time)?,
+                (None, Some(base)) => base.write(base.required(base.root(), "created")?, e)?,
+                (None, None) => e.bytes(b"0")?,
+            }
+            e.bytes(b"}")
         })?;
         for (synthetic, node) in self.synthetic.iter_mut().zip(supplied) {
             *synthetic &= node.is_none();
@@ -356,6 +370,61 @@ impl State {
     }
 }
 
+/// Unix seconds of a protobuf JSON `Timestamp`: `YYYY-MM-DDThh:mm:ss[.frac]` then `Z` or
+/// `±hh:mm`. Another spelling or a time before 1970 has none.
+/// ponytail: repeats crate::common::parse_rfc3339_unix without its day-of-month check, because
+/// the staged codec build cannot reach crate::common; call that once the codec joins the crate.
+fn unix_seconds(doc: &Document, node: usize) -> Result<Option<u64>> {
+    let (mut text, mut len, mut chars) = ([0u8; 40], 0, doc.chars(node)?);
+    while let Some(c) = chars.next_scalar()? {
+        if !c.is_ascii() || len == text.len() {
+            return Ok(None);
+        }
+        text[len] = c as u8;
+        len += 1;
+    }
+    let s = &text[..len];
+    let digits = |at: usize, n: usize| -> Option<i64> {
+        s.get(at..at + n)?
+            .iter()
+            .try_fold(0, |v, &b| b.is_ascii_digit().then(|| v * 10 + i64::from(b - b'0')))
+    };
+    let separators = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':')];
+    let fields = [(0, 4), (5, 2), (8, 2), (11, 2), (14, 2), (17, 2)].map(|(at, n)| digits(at, n));
+    let [Some(year), Some(month), Some(day), Some(hour), Some(min), Some(sec)] = fields else {
+        return Ok(None);
+    };
+    if separators.iter().any(|&(at, c)| s[at] != c) {
+        return Ok(None);
+    }
+    let mut at = 19;
+    if s.get(at) == Some(&b'.') {
+        at += 1;
+        while s.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+        }
+    }
+    let offset = match (s.get(at), digits(at + 1, 2), digits(at + 4, 2)) {
+        (Some(b'Z'), ..) if at + 1 == len => 0,
+        (Some(&sign @ (b'+' | b'-')), Some(h), Some(m)) if at + 6 == len && s[at + 3] == b':' => {
+            if sign == b'-' {
+                -(h * 60 + m) * 60
+            } else {
+                (h * 60 + m) * 60
+            }
+        }
+        _ => return Ok(None),
+    };
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 59 {
+        return Ok(None);
+    }
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let (era, yoe) = (y.div_euclid(400), y.rem_euclid(400));
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    Ok(u64::try_from(days * 86_400 + hour * 3600 + min * 60 + sec - offset).ok())
+}
 /// The Chat finish reason for a native one. Chat has no value for the other native reasons
 /// (`OTHER`, `MALFORMED_FUNCTION_CALL`, `FINISH_REASON_UNSPECIFIED`, future ones), so they
 /// finish as `stop`; the exact native reason rides along as `native_finish_reason`.
