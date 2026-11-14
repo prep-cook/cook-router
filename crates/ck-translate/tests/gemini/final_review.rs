@@ -1,0 +1,305 @@
+//! Regressions from the final review of the Gemini codec, one input per finding.
+use super::*;
+use gemini::response::Framing;
+
+/// Streamed egress writes the finish, its message and the usage with the last part, so every
+/// record carries content (the SDK keeps the turn in chat history) and the output re-enters
+/// Gemini ingress.
+#[test]
+fn streamed_finish_and_usage_travel_with_the_last_part() {
+    let body = json!({"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP","finishMessage":"done"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}});
+    let two = json!({"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"a"},{"text":"b"}]},"finishReason":"STOP"}]});
+    for downstream in [Framing::Sse, Framing::JsonArray] {
+        let (out, _) = response(
+            &sse(std::slice::from_ref(&body)),
+            Framing::Sse,
+            downstream,
+            Operation::Generate,
+        );
+        let rows = match downstream {
+            Framing::Sse => events(&out),
+            _ => serde_json::from_slice::<Vec<Value>>(&out).unwrap(),
+        };
+        assert_eq!(rows, vec![body.clone()]);
+        let (again, _) = response(&out, downstream, Framing::Json, Operation::Generate);
+        assert_eq!(serde_json::from_slice::<Value>(&again).unwrap(), body);
+        let (out, _) = response(
+            &sse(std::slice::from_ref(&two)),
+            Framing::Sse,
+            downstream,
+            Operation::Generate,
+        );
+        let rows = match downstream {
+            Framing::Sse => events(&out),
+            _ => serde_json::from_slice::<Vec<Value>>(&out).unwrap(),
+        };
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|v| v["candidates"][0]["content"]["parts"][0].is_object()),
+            "{rows:?}"
+        );
+        assert_eq!(rows[1]["candidates"][0]["finishReason"], "STOP");
+    }
+}
+
+/// Chat tool messages become one user turn of function responses linked to their calls.
+#[test]
+fn chat_tool_results_become_function_responses() {
+    use super::regressions::{chat_to_gemini, validate};
+    let out = chat_to_gemini(
+        br#"{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{}"}},{"id":"d","type":"function","function":{"name":"g","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c","content":"{\"ok\":true}"},{"role":"tool","tool_call_id":"d","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]},{"role":"user","content":"next"}]}"#,
+    );
+    assert_eq!(
+        out["contents"][1],
+        json!({"role":"user","parts":[
+            {"functionResponse":{"name":"f","id":"c","response":{"result":"{\"ok\":true}"}}},
+            {"functionResponse":{"name":"g","id":"d","response":{"result":"ab"}}}
+        ]})
+    );
+    assert_eq!(out["contents"][2], json!({"role":"user","parts":[{"text":"next"}]}));
+    let orphan = json!({"model":"m","messages":[{"role":"user","content":"x"},{"role":"tool","tool_call_id":"c","content":"r"}]});
+    assert!(matches!(validate(&orphan), Err(codec::Error::Unsupported)));
+}
+
+/// Gemini body through Gemini ingress and buffered Chat egress.
+pub(super) fn gemini_to_chat(body: &Value) -> codec::Result<Value> {
+    let mut mapped = Mapped::new();
+    let mut reader = mapped.store.reader(mapped.writer.id(), 0).unwrap();
+    let mut ingress = gemini::response::Ingress::with_framing(
+        &mut mapped.writer,
+        identity(Direction::Response),
+        Operation::Generate,
+        Framing::Json,
+        1 << 20,
+    )
+    .unwrap();
+    ingress
+        .advance(&mut mapped.writer, &serde_json::to_vec(body).unwrap())
+        .unwrap();
+    ingress.finish(&mut mapped.writer).unwrap();
+    let mut egress = codec::chat::egress::Egress::new(
+        &mut mapped.writer,
+        identity(Direction::Response),
+        Operation::Generate,
+        BodyMode::Buffered,
+        true,
+        |_| {},
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    while let Poll::Ready(Some(ck_stream::Read::Record(lease))) = reader.try_next() {
+        egress.advance(&mut mapped.writer, lease, |part| {
+            out.extend(bytes(&part));
+            Ok(())
+        })?;
+    }
+    Ok(serde_json::from_slice(&out).unwrap())
+}
+
+/// A Gemini call without a native id reaches Chat under its canonical call id.
+#[test]
+fn id_less_gemini_call_reaches_chat() {
+    let body =
+        json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":"f","args":{}}}]},"finishReason":"STOP"}]});
+    let out = gemini_to_chat(&body).unwrap();
+    let call = &out["choices"][0]["message"]["tool_calls"][0];
+    assert_eq!(call["function"]["name"], "f");
+    assert!(call["id"].as_str().is_some_and(|id| !id.is_empty()), "{out}");
+    assert_eq!(out["choices"][0]["finish_reason"], "tool_calls");
+}
+
+/// Chat controls the fence accepts reach Gemini with their meaning.
+#[test]
+fn chat_controls_keep_their_meaning() {
+    use super::regressions::{chat_to_gemini, validate};
+    let config = |extra: &str| {
+        let body = format!(r#"{{"model":"m","messages":[{{"role":"user","content":"hi"}}],{extra}}}"#);
+        chat_to_gemini(body.as_bytes())["generationConfig"].clone()
+    };
+    assert_eq!(config(r#""max_completion_tokens":17"#), json!({"maxOutputTokens":17}));
+    assert_eq!(
+        config(r#""response_format":{"type":"json_object"}"#),
+        json!({"responseMimeType":"application/json"})
+    );
+    assert_eq!(config(r#""stop":"END""#), json!({"stopSequences":["END"]}));
+    assert_eq!(config(r#""stop":["A","B"]"#), json!({"stopSequences":["A","B"]}));
+    let unknown = json!({"model":"m","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"grammar"}});
+    assert!(matches!(validate(&unknown), Err(codec::Error::Unsupported)));
+}
+
+/// Each usage update keeps only the merged snapshot: a long run of updates stays within the
+/// default stream limits (it failed near 5,149 updates when every snapshot was retained).
+#[test]
+fn usage_updates_keep_one_snapshot() {
+    let directory = std::env::temp_dir().join(format!("ck-gemini-{}", uuid::Uuid::new_v4()));
+    let mut config = ck_stream::Config::new(directory.clone());
+    config.workers = 1;
+    let mut store =
+        ck_stream::Store::with_clock(config, std::sync::Arc::new(ck_stream::ManualClock::default())).unwrap();
+    let mut writer = store.create().unwrap();
+    let mut reader = store.reader(writer.id(), 0).unwrap();
+    let mut ingress = gemini::response::Ingress::with_framing(
+        &mut writer,
+        identity(Direction::Response),
+        Operation::Generate,
+        Framing::Sse,
+        1 << 30,
+    )
+    .unwrap();
+    let rows = [json!({"candidates":[{"index":0,"content":{"parts":[{"text":"t"}]}}]})]
+        .into_iter()
+        .chain((0..8000).map(|i| json!({"usageMetadata":{"candidatesTokenCount":i}})))
+        .chain([json!({"candidates":[{"index":0,"finishReason":"STOP"}]})]);
+    for row in rows {
+        ingress
+            .advance(&mut writer, format!("data: {row}\n\n").as_bytes())
+            .unwrap();
+        while let Poll::Ready(Some(_)) = reader.try_next() {}
+    }
+    ingress.finish(&mut writer).unwrap();
+    drop((ingress, reader, writer));
+    store.shutdown().unwrap();
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// A supplied createTime becomes the canonical creation time in Unix seconds; its exact
+/// spelling stays in provenance.
+#[test]
+fn create_time_becomes_unix_seconds() {
+    for (time, seconds) in [
+        ("2026-11-15T00:00:00Z", 1_794_700_800),
+        ("2026-11-15T00:00:00.123456789+01:30", 1_794_695_400),
+    ] {
+        let body = json!({"createTime":time,"candidates":[{"finishReason":"STOP"}]});
+        let (out, canonical) = response(
+            &serde_json::to_vec(&body).unwrap(),
+            Framing::Json,
+            Framing::Json,
+            Operation::Generate,
+        );
+        let start = canonical
+            .iter()
+            .find(|v| v["x_ck"]["source"]["timestamp"].is_string())
+            .unwrap();
+        assert_eq!(start["created"], seconds, "{start}");
+        assert!(
+            start["x_ck"]
+                .get("synthetic")
+                .is_none_or(|s| !s.as_array().unwrap().contains(&json!("created")))
+        );
+        assert!(
+            canonical
+                .iter()
+                .filter(|v| v.get("created").is_some())
+                .all(|v| v["created"] == seconds)
+        );
+        assert_eq!(serde_json::from_slice::<Value>(&out).unwrap()["createTime"], time);
+    }
+}
+
+/// An identity that arrives in a body without candidates still reaches canonical consumers
+/// and the Gemini client, createTime included.
+#[test]
+fn metadata_only_late_identity_reaches_egress() {
+    let rows = [
+        json!({"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}),
+        json!({"responseId":"late","modelVersion":"late-m","createTime":"2026-11-15T00:00:00Z","usageMetadata":{"promptTokenCount":1}}),
+    ];
+    for downstream in [Framing::Json, Framing::Sse] {
+        let (out, canonical) = response(&sse(&rows), Framing::Sse, downstream, Operation::Generate);
+        let last = match downstream {
+            Framing::Json => serde_json::from_slice::<Value>(&out).unwrap(),
+            _ => events(&out).pop().unwrap(),
+        };
+        assert_eq!(last["responseId"], "late", "{last}");
+        assert_eq!(last["modelVersion"], "late-m");
+        assert_eq!(last["createTime"], "2026-11-15T00:00:00Z");
+        let chunk = canonical.iter().rev().find(|v| v.get("choices").is_some()).unwrap();
+        assert_eq!(
+            (&chunk["id"], &chunk["model"], &chunk["created"]),
+            (&json!("late"), &json!("late-m"), &json!(1_794_700_800))
+        );
+    }
+}
+
+/// An explicit response id answers its call, so a later response without an id takes the
+/// next call of that name rather than the same one.
+#[test]
+fn explicit_response_ids_consume_their_call() {
+    for (first, second) in [("a", "b"), ("b", "a")] {
+        let input = json!({"contents":[
+            {"role":"model","parts":[{"functionCall":{"id":"a","name":"f","args":{}}},{"functionCall":{"id":"b","name":"f","args":{}}}]},
+            {"role":"user","parts":[{"functionResponse":{"id":first,"name":"f","response":{}}},{"functionResponse":{"name":"f","response":{}}}]}
+        ]});
+        let (out, canonical) = request(&input, Operation::Generate);
+        assert_eq!(out, input);
+        assert_eq!(
+            super::regressions::result_ids(&canonical, 1),
+            [json!(first), json!(second)]
+        );
+    }
+}
+
+/// SSE fields around a response and events with unknown names survive SSE egress; they are
+/// not decoded as response bodies.
+#[test]
+fn native_sse_metadata_and_unknown_events_stay_opaque() {
+    let body = json!({"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]});
+    let unknown = "event: future_event\ndata: plain text\ndata: {\"x\":1}\n\n";
+    let mut wire = format!("{unknown}id: ev1\nretry: 1500\nevent: message\n").into_bytes();
+    wire.extend(sse(std::slice::from_ref(&body)));
+    wire.extend(unknown.as_bytes());
+    let (out, _) = response(&wire, Framing::Sse, Framing::Sse, Operation::Generate);
+    let raw = String::from_utf8(out.clone()).unwrap();
+    assert_eq!(raw.matches(unknown).count(), 2, "{raw}");
+    assert!(raw.contains("id: ev1\nretry: 1500\nevent: message\n"), "{raw}");
+    let text: Value = raw
+        .lines()
+        .find_map(|l| l.strip_prefix("data: {\"candidates\""))
+        .map(|rest| serde_json::from_str(&format!("{{\"candidates\"{rest}")).unwrap())
+        .unwrap();
+    assert_eq!(text["candidates"][0]["content"]["parts"][0]["text"], "hi");
+    let (again, _) = response(&out, Framing::Sse, Framing::Json, Operation::Generate);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&again).unwrap()["candidates"][0]["finishReason"],
+        "STOP"
+    );
+}
+
+/// Unknown members inside known response containers, and request part members whose names
+/// collide with canonical ones, return to Gemini unchanged.
+#[test]
+fn nested_unknown_members_survive() {
+    let body = json!({"candidates":[{"index":0,"content":{"role":"model","parts":[
+        {"functionCall":{"name":"f","args":{},"futureCall":18}},
+        {"inlineData":{"mimeType":"image/png","data":"AAAA","futureInline":19}}
+    ],"futureContent":17},"finishReason":"STOP"}]});
+    for upstream in [Framing::Json, Framing::Sse] {
+        let input = match upstream {
+            Framing::Json => serde_json::to_vec(&body).unwrap(),
+            _ => sse(std::slice::from_ref(&body)),
+        };
+        let (out, _) = response(&input, upstream, Framing::Json, Operation::Generate);
+        assert_eq!(serde_json::from_slice::<Value>(&out).unwrap(), body);
+        let (out, _) = response(&input, upstream, Framing::Sse, Operation::Generate);
+        let rows = events(&out);
+        let candidates: Vec<_> = rows.iter().map(|v| &v["candidates"][0]).collect();
+        assert!(
+            candidates.iter().any(|c| c["content"]["futureContent"] == 17),
+            "{rows:?}"
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c["content"]["parts"][0]["functionCall"]["futureCall"] == 18)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c["content"]["parts"][0]["inlineData"]["futureInline"] == 19)
+        );
+    }
+    let input = json!({"contents":[{"role":"user","parts":[{"text":"hi","type":"vendor","source":1},{"functionCall":{"name":"f","args":{}},"type":"x"}]}]});
+    assert_eq!(request(&input, Operation::Generate).0, input);
+}

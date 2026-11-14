@@ -76,6 +76,7 @@ impl Egress {
             return Err(Error::Closed);
         }
         let (kind, doc) = internal::decode(owner, input)?;
+        internal::refuse_uri_media(kind, &doc)?;
         let root = doc.root();
         let x = doc.required(root, "x_ck")?;
         if doc.unsigned(doc.required(x, "seq")?)? != self.sequence

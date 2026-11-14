@@ -1,0 +1,590 @@
+//! Gemini response egress. Each open part keeps its own small document, so a streamed response
+//! holds only its open parts; a buffered response also keeps the body it returns at `done`.
+
+mod candidate;
+mod part;
+
+use super::{Table, mapped, response::Framing};
+use crate::codec::{
+    self, BodyMode, Error, Operation, Result,
+    document::{Document, Name, Value},
+    encode::{self, Encoder},
+    event::{Identity, Kind, LocalId},
+    internal,
+};
+use ck_stream::{Lease, ScratchLease, Writer};
+
+#[derive(Clone, Copy, Debug)]
+pub enum Diagnostic {
+    /// The event has no Gemini carrier, or carries another protocol's native payload.
+    UnsupportedEvent(Kind),
+    SseMetadata,
+}
+pub struct Egress {
+    owner: u64,
+    operation: Operation,
+    framing: Framing,
+    /// `responseId`, `modelVersion` and `createTime` from the response start.
+    identity: Option<Document>,
+    /// The buffered response body; streamed output writes each record as it completes.
+    body: Option<Document>,
+    /// Streamed response members (usage, prompt feedback, extras), written with the last record.
+    top: Option<Document>,
+    choices: Table<Choice>,
+    /// Open parts only; a part leaves the table when its block ends.
+    blocks: Table<Block>,
+    terminal: bool,
+    failed: bool,
+    array_started: bool,
+    /// SSE fields were written without data; the next record completes their event.
+    open_event: bool,
+    diagnostic: fn(Diagnostic),
+}
+struct Choice {
+    index: u64,
+    /// The candidate object in the buffered body.
+    node: Option<usize>,
+    finished: bool,
+    /// Streamed output holds the last completed part and the candidate members that follow it,
+    /// so every record carries content and the last one also carries the finish.
+    part: Option<Document>,
+    fields: Option<Document>,
+}
+struct Block {
+    item: LocalId,
+    index: u64,
+    choice: u64,
+    /// The native part under construction, at the document root.
+    document: Document,
+    arguments: Option<usize>,
+    media: Option<usize>,
+    thought: bool,
+    /// A streamed part holds its latest text until more text, its signature or its end arrives.
+    held: bool,
+}
+impl Egress {
+    pub fn new(
+        owner: &mut Writer,
+        _identity: Identity,
+        operation: Operation,
+        mode: BodyMode,
+        diagnostic: fn(Diagnostic),
+    ) -> Result<Self> {
+        Self::with_framing(
+            owner,
+            operation,
+            if mode == BodyMode::Buffered {
+                Framing::Json
+            } else {
+                Framing::Sse
+            },
+            diagnostic,
+        )
+    }
+    pub fn with_framing(
+        owner: &mut Writer,
+        operation: Operation,
+        framing: Framing,
+        diagnostic: fn(Diagnostic),
+    ) -> Result<Self> {
+        if operation == Operation::Compact || (operation == Operation::CountTokens && framing != Framing::Json) {
+            return Err(Error::Unsupported);
+        }
+        Ok(Self {
+            owner: owner.id(),
+            operation,
+            framing,
+            identity: None,
+            body: match framing {
+                Framing::Json => Some(mapped(owner, |e| e.bytes(b"{\"candidates\":[]}"))?),
+                Framing::Sse | Framing::JsonArray => None,
+            },
+            top: None,
+            choices: Table::new(owner)?,
+            blocks: Table::new(owner)?,
+            terminal: false,
+            failed: false,
+            array_started: false,
+            open_event: false,
+            diagnostic,
+        })
+    }
+    fn accept(
+        &mut self,
+        owner: &mut Writer,
+        kind: Kind,
+        event: Document,
+        output: &mut impl FnMut(ScratchLease) -> Result<()>,
+    ) -> Result<()> {
+        if self.identity.is_none() && !matches!(kind, Kind::ResponseStart | Kind::Error | Kind::Cancelled) {
+            return Err(Error::Schema);
+        }
+        match kind {
+            Kind::ResponseStart => self.start(owner, &event)?,
+            Kind::ItemStart | Kind::ItemEnd | Kind::Heartbeat | Kind::MediaEnd => (),
+            Kind::BlockStart => self.block_start(owner, event)?,
+            Kind::Chunk => self.chunk(owner, event, output)?,
+            Kind::ReasoningSignature => self.signature(event)?,
+            Kind::ToolStart => self.tool_start(event)?,
+            Kind::ToolEnd => self.tool_end(owner, &event)?,
+            Kind::ToolResult | Kind::CodeExecution | Kind::MediaTranscript => self.part_value(kind, event)?,
+            Kind::MediaStart => self.media_start(event)?,
+            Kind::Data => self.data(event)?,
+            Kind::BlockEnd => self.block_end(owner, &event, output)?,
+            Kind::Grounding | Kind::UrlContext | Kind::Annotation => self.annotation(owner, kind, &event, output)?,
+            Kind::Usage => self.usage(owner, &event)?,
+            Kind::CountTokens => self.count(owner, &event)?,
+            Kind::Opaque => self.opaque(owner, &event, output)?,
+            Kind::Done => self.done(owner, output)?,
+            Kind::Error | Kind::Cancelled => self.error(owner, output)?,
+            _ => (self.diagnostic)(Diagnostic::UnsupportedEvent(kind)),
+        }
+        Ok(())
+    }
+    /// Keeps the native identity of the response; synthesized values have no native field.
+    fn start(&mut self, owner: &mut Writer, event: &Document) -> Result<()> {
+        if self.identity.is_some() {
+            return Err(Error::Schema);
+        }
+        let root = event.root();
+        let x = event.required(root, "x_ck")?;
+        let timestamp = match event.member(x, "source")? {
+            Some(source) => event.member(source, "timestamp")?,
+            None => None,
+        };
+        let mut fields = [None; 3];
+        for (slot, (canonical, native)) in fields.iter_mut().zip([("id", "responseId"), ("model", "modelVersion")]) {
+            if !synthetic(event, x, canonical)? {
+                *slot = event.member(root, canonical)?.map(|node| (native, node));
+            }
+        }
+        fields[2] = timestamp.map(|node| ("createTime", node));
+        self.identity = Some(mapped(owner, |e| {
+            e.bytes(b"{")?;
+            let mut first = true;
+            for &(name, node) in fields.iter().flatten() {
+                if !first {
+                    e.bytes(b",")?;
+                }
+                first = false;
+                e.string(name)?;
+                e.bytes(b":")?;
+                event.write(node, e)?;
+            }
+            e.bytes(b"}")
+        })?);
+        Ok(())
+    }
+    /// Takes a native chunk's `id`, `model` and source timestamp into the identity when they
+    /// differ from it, so an identity the upstream supplied after the response start reaches
+    /// the client.
+    fn refresh(&mut self, owner: &mut Writer, event: &Document, x: usize) -> Result<()> {
+        let root = event.root();
+        let identity = self.identity.as_ref().ok_or(Error::Schema)?;
+        let source = event.member(x, "source")?;
+        let mut supplied = [None; 3];
+        for (slot, canonical) in supplied.iter_mut().zip(["id", "model", "timestamp"]) {
+            *slot = match canonical {
+                "timestamp" => source.map(|s| event.member(s, canonical)).transpose()?.flatten(),
+                _ if synthetic(event, x, canonical)? => None,
+                _ => event.member(root, canonical)?,
+            };
+        }
+        let names = ["responseId", "modelVersion", "createTime"];
+        let mut changed = false;
+        for (name, node) in names.into_iter().zip(supplied) {
+            if let Some(node) = node {
+                changed |= match identity.member(identity.root(), name)? {
+                    Some(current) => !super::same(identity, current, event, node)?,
+                    None => true,
+                };
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
+        let refreshed = mapped(owner, |e| {
+            e.bytes(b"{")?;
+            let mut first = true;
+            for (name, node) in names.into_iter().zip(supplied) {
+                if let Some(node) = node {
+                    e.bytes(if std::mem::replace(&mut first, false) {
+                        b""
+                    } else {
+                        b","
+                    })?;
+                    e.string(name)?;
+                    e.bytes(b":")?;
+                    event.write(node, e)?;
+                }
+            }
+            for node in identity.children(identity.root())? {
+                let name = identity.node(node)?.name.ok_or(Error::Schema)?;
+                if names.into_iter().zip(supplied).try_fold(false, |found, (key, n)| {
+                    Ok::<_, Error>(found || (n.is_some() && identity.name_is(name, key)?))
+                })? {
+                    continue;
+                }
+                e.bytes(if std::mem::replace(&mut first, false) {
+                    b""
+                } else {
+                    b","
+                })?;
+                identity.write_name(name, e)?;
+                e.bytes(b":")?;
+                identity.write(node, e)?;
+            }
+            e.bytes(b"}")
+        })?;
+        self.identity = Some(refreshed);
+        Ok(())
+    }
+    /// Writes one streamed record: the members `write` adds, then the response identity, which
+    /// Gemini repeats in every streamed response. `write` clears the flag once it writes a member.
+    fn record(
+        &mut self,
+        owner: &mut Writer,
+        output: &mut impl FnMut(ScratchLease) -> Result<()>,
+        write: impl Fn(&mut bool, &mut Encoder<'_, '_>) -> Result<()>,
+    ) -> Result<()> {
+        let identity = self.identity.take().ok_or(Error::Schema)?;
+        let result = self.emit(owner, output, |e| {
+            e.bytes(b"{")?;
+            let mut first = true;
+            write(&mut first, e)?;
+            fields(&identity, identity.root(), &[], &mut first, e)?;
+            e.bytes(b"}")
+        });
+        self.identity = Some(identity);
+        result
+    }
+    /// Writes `write`'s bytes as one output record in the client framing.
+    fn emit(
+        &mut self,
+        owner: &mut Writer,
+        output: &mut impl FnMut(ScratchLease) -> Result<()>,
+        write: impl Fn(&mut Encoder<'_, '_>) -> Result<()>,
+    ) -> Result<()> {
+        let prefix: &[u8] = match (self.framing, self.array_started) {
+            (Framing::Sse, _) => b"data: ",
+            (Framing::JsonArray, false) => b"[",
+            (Framing::JsonArray, true) => b",",
+            (Framing::Json, _) => b"",
+        };
+        let suffix: &[u8] = if self.framing == Framing::Sse { b"\n\n" } else { b"" };
+        output(encode::scratch(owner, |e| {
+            e.bytes(prefix)?;
+            write(e)?;
+            e.bytes(suffix)
+        })?)?;
+        self.array_started = true;
+        self.open_event = false;
+        Ok(())
+    }
+    fn choice(&mut self, index: u64) -> Result<usize> {
+        if let Some(slot) = self.choices.iter().position(|c| c.index == index) {
+            return Ok(slot);
+        }
+        let node = match &mut self.body {
+            Some(body) => {
+                let node = body.add(None, Value::Object)?;
+                body.append(body.required(body.root(), "candidates")?, node)?;
+                body.set(node, "index", Value::Unsigned(index))?;
+                let content = body.set(node, "content", Value::Object)?;
+                body.set(content, "role", Value::Text("model"))?;
+                body.set(content, "parts", Value::Array)?;
+                Some(node)
+            }
+            None => None,
+        };
+        self.choices.push(Choice {
+            index,
+            node,
+            finished: false,
+            part: None,
+            fields: None,
+        })
+    }
+    /// The open choice of a record's `choice_index`.
+    fn open_choice(&mut self, index: u64) -> Result<usize> {
+        let slot = self.choice(index)?;
+        if self.choices[slot].finished {
+            return Err(Error::Schema);
+        }
+        Ok(slot)
+    }
+    fn done(&mut self, owner: &mut Writer, output: &mut impl FnMut(ScratchLease) -> Result<()>) -> Result<()> {
+        if !self.blocks.is_empty()
+            || (self.operation == Operation::Generate && self.choices.iter().any(|c| !c.finished))
+        {
+            return Err(Error::Truncated);
+        }
+        match self.framing {
+            Framing::Json => {
+                let body = self.body.take().ok_or(Error::Schema)?;
+                if self.operation == Operation::CountTokens {
+                    self.emit(owner, output, |e| body.write(body.root(), e))?;
+                } else {
+                    self.record(owner, output, |first, e| fields(&body, body.root(), &[], first, e))?;
+                }
+            }
+            Framing::JsonArray => {
+                self.last(owner, output)?;
+                let close: &[u8] = if self.array_started { b"]" } else { b"[]" };
+                output(encode::scratch(owner, |e| e.bytes(close))?)?;
+            }
+            Framing::Sse => {
+                self.last(owner, output)?;
+                if self.open_event {
+                    output(encode::scratch(owner, |e| e.bytes(b"\n"))?)?;
+                }
+            }
+        }
+        self.terminal = true;
+        Ok(())
+    }
+    /// Writes a streamed choice's held part, with its candidate members when `fields` is set.
+    fn flush(
+        &mut self,
+        owner: &mut Writer,
+        slot: usize,
+        fields: bool,
+        output: &mut impl FnMut(ScratchLease) -> Result<()>,
+    ) -> Result<()> {
+        let choice = &mut self.choices[slot];
+        let (index, part) = (choice.index, choice.part.take());
+        let members = if fields { choice.fields.take() } else { None };
+        self.record(owner, output, |first, e| {
+            *first = false;
+            e.bytes(b"\"candidates\":[")?;
+            candidate(e, index, part.as_ref(), members.as_ref())?;
+            e.bytes(b"]")
+        })
+    }
+    /// Writes the last streamed record: every held candidate with its finish, and the response
+    /// members, as Gemini sends them together in its final chunk.
+    fn last(&mut self, owner: &mut Writer, output: &mut impl FnMut(ScratchLease) -> Result<()>) -> Result<()> {
+        let held = |c: &Choice| c.part.is_some() || c.fields.is_some();
+        if self.identity.is_none() || (self.top.is_none() && !self.choices.iter().any(held)) {
+            return Ok(());
+        }
+        let choices = std::mem::replace(&mut self.choices, Table::new(owner)?);
+        let top = self.top.take();
+        self.record(owner, output, |first, e| {
+            for c in choices.iter().filter(|c| held(c)) {
+                e.bytes(if std::mem::replace(first, false) {
+                    b"\"candidates\":["
+                } else {
+                    b","
+                })?;
+                candidate(e, c.index, c.part.as_ref(), c.fields.as_ref())?;
+            }
+            if !*first {
+                e.bytes(b"]")?;
+            }
+            match &top {
+                Some(top) => fields(top, top.root(), &[], first, e),
+                None => Ok(()),
+            }
+        })
+    }
+    fn error(&mut self, owner: &mut Writer, output: &mut impl FnMut(ScratchLease) -> Result<()>) -> Result<()> {
+        if self.body.is_none() {
+            self.last(owner, output)?;
+        }
+        self.emit(owner, output, |e| {
+            e.bytes(b"{\"error\":{\"code\":502,\"message\":\"Incomplete upstream response\",\"status\":\"INTERNAL\"}}")
+        })?;
+        if self.framing == Framing::JsonArray {
+            output(encode::scratch(owner, |e| e.bytes(b"]"))?)?;
+        }
+        self.terminal = true;
+        Ok(())
+    }
+}
+impl codec::ResponseEgress for Egress {
+    fn advance(
+        &mut self,
+        owner: &mut Writer,
+        input: Lease,
+        mut output: impl FnMut(ScratchLease) -> Result<()>,
+    ) -> Result<()> {
+        if owner.id() != self.owner {
+            return Err(Error::Position);
+        }
+        if self.terminal || self.failed {
+            return Err(Error::Closed);
+        }
+        let result =
+            internal::decode(owner, input).and_then(|(kind, event)| self.accept(owner, kind, event, &mut output));
+        self.failed = result.is_err();
+        result
+    }
+    fn finish(&mut self) -> Result<()> {
+        if self.terminal && !self.failed {
+            Ok(())
+        } else {
+            Err(Error::Truncated)
+        }
+    }
+}
+/// Writes the members of `parent` not named in `skip`, separated by commas; `first` tells
+/// whether the enclosing object has no member yet.
+fn fields(doc: &Document, parent: usize, skip: &[&str], first: &mut bool, e: &mut Encoder<'_, '_>) -> Result<()> {
+    for node in doc.children(parent)? {
+        let name = doc.node(node)?.name.ok_or(Error::Schema)?;
+        if skip
+            .iter()
+            .try_fold(false, |found, key| Ok::<_, Error>(found || doc.name_is(name, key)?))?
+        {
+            continue;
+        }
+        if !std::mem::replace(first, false) {
+            e.bytes(b",")?;
+        }
+        doc.write_name(name, e)?;
+        e.bytes(b":")?;
+        doc.write(node, e)?;
+    }
+    Ok(())
+}
+/// Writes a streamed candidate: its held part and its members.
+fn candidate(e: &mut Encoder<'_, '_>, index: u64, part: Option<&Document>, members: Option<&Document>) -> Result<()> {
+    e.bytes(b"{\"index\":")?;
+    e.unsigned(index)?;
+    let content = members.map(|m| m.member(m.root(), "content")).transpose()?.flatten();
+    if part.is_some() || content.is_some() {
+        e.bytes(b",\"content\":{\"role\":\"model\"")?;
+        if let Some(part) = part {
+            e.bytes(b",\"parts\":[")?;
+            part.write(part.root(), e)?;
+            e.bytes(b"]")?;
+        }
+        if let (Some(members), Some(content)) = (members, content) {
+            fields(members, content, &[], &mut false, e)?;
+        }
+        e.bytes(b"}")?;
+    }
+    if let Some(members) = members {
+        fields(members, members.root(), &["content"], &mut false, e)?;
+    }
+    e.bytes(b"}")
+}
+/// A copy of object `old` with the members of `parent` in `doc` not named in `skip`; they
+/// replace same-named members. Rebuilding keeps a repeatedly updated object bounded.
+fn merged(
+    owner: &mut Writer,
+    old: Option<&Document>,
+    doc: &Document,
+    parent: usize,
+    skip: &[&str],
+) -> Result<Document> {
+    mapped(owner, |e| {
+        e.bytes(b"{")?;
+        merge(old.map(|old| (old, old.root())), doc, parent, skip, true, e)?;
+        e.bytes(b"}")
+    })
+}
+/// Writes the members of `old` that `parent` does not replace, then those of `parent` not named
+/// in `skip`. With `nested`, a candidate `content` object in both merges its members the same way.
+fn merge(
+    old: Option<(&Document, usize)>,
+    doc: &Document,
+    parent: usize,
+    skip: &[&str],
+    nested: bool,
+    e: &mut Encoder<'_, '_>,
+) -> Result<()> {
+    let skipped = |name| {
+        skip.iter()
+            .try_fold(false, |found, key| Ok::<_, Error>(found || doc.name_is(name, key)?))
+    };
+    let mut first = true;
+    let mut content = None;
+    for node in old.map(|(o, n)| o.children(n)).transpose()?.into_iter().flatten() {
+        let (old, _) = old.ok_or(Error::Schema)?;
+        let name = old.node(node)?.name.ok_or(Error::Schema)?;
+        let mut replaced = false;
+        for other in doc.children(parent)? {
+            let other = doc.node(other)?.name.ok_or(Error::Schema)?;
+            replaced = replaced || (!skipped(other)? && same_name(old, name, doc, other)?);
+        }
+        if replaced && nested && old.name_is(name, "content")? && matches!(old.node(node)?.value, Value::Object) {
+            content = Some((old, node));
+        } else if !replaced {
+            comma(&mut first, e)?;
+            old.write_name(name, e)?;
+            e.bytes(b":")?;
+            old.write(node, e)?;
+        }
+    }
+    for node in doc.children(parent)? {
+        let name = doc.node(node)?.name.ok_or(Error::Schema)?;
+        if skipped(name)? {
+            continue;
+        }
+        comma(&mut first, e)?;
+        doc.write_name(name, e)?;
+        e.bytes(b":")?;
+        match content {
+            Some(old) if doc.name_is(name, "content")? && matches!(doc.node(node)?.value, Value::Object) => {
+                e.bytes(b"{")?;
+                merge(Some(old), doc, node, &[], false, e)?;
+                e.bytes(b"}")?;
+            }
+            _ => doc.write(node, e)?,
+        }
+    }
+    Ok(())
+}
+fn comma(first: &mut bool, e: &mut Encoder<'_, '_>) -> Result<()> {
+    if std::mem::replace(first, false) {
+        Ok(())
+    } else {
+        e.bytes(b",")
+    }
+}
+fn same_name(a: &Document, x: Name, b: &Document, y: Name) -> Result<bool> {
+    let (mut left, mut right) = (a.name_chars(x)?, b.name_chars(y)?);
+    loop {
+        let c = left.next_scalar()?;
+        if c != right.next_scalar()? {
+            return Ok(false);
+        }
+        if c.is_none() {
+            return Ok(true);
+        }
+    }
+}
+fn local(doc: &Document, node: usize) -> Result<LocalId> {
+    let mut buffer = [0; 64];
+    let mut len = 0;
+    let mut chars = doc.chars(node)?;
+    while let Some(c) = chars.next_scalar()? {
+        if !c.is_ascii() || len == buffer.len() {
+            return Err(Error::Schema);
+        }
+        buffer[len] = c as u8;
+        len += 1;
+    }
+    LocalId::new(std::str::from_utf8(&buffer[..len]).map_err(|_| Error::Schema)?)
+}
+/// Whether the record marks its canonical field `name` as synthesized.
+fn synthetic(doc: &Document, x: usize, name: &str) -> Result<bool> {
+    let Some(fields) = doc.member(x, "synthetic")? else {
+        return Ok(false);
+    };
+    for field in doc.children(fields)? {
+        if doc.string_is(field, name)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+/// Whether the record's payload came from a Gemini source, so its native value has a carrier.
+fn native(doc: &Document, x: usize) -> Result<bool> {
+    match doc.member(x, "source")? {
+        Some(source) => super::is(doc, source, "protocol", "gemini"),
+        None => Ok(false),
+    }
+}
