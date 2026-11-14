@@ -82,7 +82,7 @@ impl State {
         }
         self.extras(owner, doc, root, None, RESPONSE_KNOWN)
     }
-    fn start(&mut self, owner: &mut Writer, doc: &Document) -> Result<()> {
+    pub(super) fn start(&mut self, owner: &mut Writer, doc: &Document) -> Result<()> {
         let root = doc.root();
         let base = self.base_fields(owner, doc)?;
         let synthetic = self.synthetic;

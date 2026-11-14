@@ -131,7 +131,7 @@ impl Egress {
             Kind::Grounding | Kind::UrlContext | Kind::Annotation => self.annotation(owner, kind, &event, output)?,
             Kind::Usage => self.usage(owner, &event)?,
             Kind::CountTokens => self.count(owner, &event)?,
-            Kind::Opaque => self.opaque(owner, &event)?,
+            Kind::Opaque => self.opaque(owner, &event, output)?,
             Kind::Done => self.done(owner, output)?,
             Kind::Error | Kind::Cancelled => self.error(owner, output)?,
             _ => (self.diagnostic)(Diagnostic::UnsupportedEvent(kind)),

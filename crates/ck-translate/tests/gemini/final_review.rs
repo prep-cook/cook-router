@@ -240,3 +240,29 @@ fn explicit_response_ids_consume_their_call() {
         );
     }
 }
+
+/// SSE fields around a response and events with unknown names survive SSE egress; they are
+/// not decoded as response bodies.
+#[test]
+fn native_sse_metadata_and_unknown_events_stay_opaque() {
+    let body = json!({"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]});
+    let unknown = "event: future_event\ndata: plain text\ndata: {\"x\":1}\n\n";
+    let mut wire = format!("{unknown}id: ev1\nretry: 1500\nevent: message\n").into_bytes();
+    wire.extend(sse(&[body.clone()]));
+    wire.extend(unknown.as_bytes());
+    let (out, _) = response(&wire, Framing::Sse, Framing::Sse, Operation::Generate);
+    let raw = String::from_utf8(out.clone()).unwrap();
+    assert_eq!(raw.matches(unknown).count(), 2, "{raw}");
+    assert!(raw.contains("id: ev1\nretry: 1500\nevent: message\n"), "{raw}");
+    let text: Value = raw
+        .lines()
+        .find_map(|l| l.strip_prefix("data: {\"candidates\""))
+        .map(|rest| serde_json::from_str(&format!("{{\"candidates\"{rest}")).unwrap())
+        .unwrap();
+    assert_eq!(text["candidates"][0]["content"]["parts"][0]["text"], "hi");
+    let (again, _) = response(&out, Framing::Sse, Framing::Json, Operation::Generate);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&again).unwrap()["candidates"][0]["finishReason"],
+        "STOP"
+    );
+}

@@ -1,6 +1,6 @@
 //! Candidate and response members: finish reasons, metadata, usage, counts and native extras.
 
-use super::{Diagnostic, Egress, mapped, merged, native};
+use super::{Diagnostic, Egress, Framing, mapped, merged, native};
 use crate::codec::{
     Error, Operation, Result,
     document::{Document, Value},
@@ -194,11 +194,20 @@ impl Egress {
         Ok(())
     }
     /// Restores the response and candidate members the Gemini source had no mapping for.
-    pub(super) fn opaque(&mut self, owner: &mut Writer, event: &Document) -> Result<()> {
+    pub(super) fn opaque(
+        &mut self,
+        owner: &mut Writer,
+        event: &Document,
+        output: &mut impl FnMut(ScratchLease) -> Result<()>,
+    ) -> Result<()> {
         let root = event.root();
         let candidate = super::super::is(event, root, "name", "gemini.candidate")?;
         if !candidate && !super::super::is(event, root, "name", "gemini.response")? {
-            let sse = super::super::is(event, root, "name", "gemini.sse")?;
+            let sse = super::super::is(event, root, "name", "gemini.sse")?
+                || super::super::is(event, root, "name", "gemini.event")?;
+            if sse && self.framing == Framing::Sse {
+                return output(encode::scratch(owner, |e| sse_event(event, e))?);
+            }
             (self.diagnostic)(if sse {
                 Diagnostic::SseMetadata
             } else {
@@ -254,6 +263,49 @@ impl Egress {
         }
         Ok(())
     }
+}
+/// Restores a native SSE event: its fields, then its data lines when it travelled as text.
+fn sse_event(event: &Document, e: &mut Encoder<'_, '_>) -> Result<()> {
+    let root = event.root();
+    let x = event.required(root, "x_ck")?;
+    let fields = match event.member(x, "source")? {
+        Some(source) => event.member(source, "sse")?,
+        None => None,
+    };
+    for field in fields.map(|f| event.children(f)).transpose()?.into_iter().flatten() {
+        if matches!(event.node(event.required(field, "comment")?)?.value, Value::Bool(true)) {
+            e.bytes(b":")?;
+        } else {
+            line(event, event.required(field, "name")?, e)?;
+            e.bytes(b":")?;
+        }
+        e.bytes(b" ")?;
+        line(event, event.required(field, "value")?, e)?;
+        e.bytes(b"\n")?;
+    }
+    if super::super::is(event, root, "format", "text")? {
+        e.bytes(b"data: ")?;
+        let mut chars = event.chars(event.required(root, "value")?)?;
+        while let Some(c) = chars.next_scalar()? {
+            match c {
+                '\n' => e.bytes(b"\ndata: ")?,
+                '\r' => return Err(Error::Schema),
+                c => e.bytes(c.encode_utf8(&mut [0; 4]).as_bytes())?,
+            }
+        }
+        e.bytes(b"\n")?;
+    }
+    e.bytes(b"\n")
+}
+fn line(doc: &Document, node: usize, e: &mut Encoder<'_, '_>) -> Result<()> {
+    let mut chars = doc.chars(node)?;
+    while let Some(c) = chars.next_scalar()? {
+        if matches!(c, '\r' | '\n') {
+            return Err(Error::Schema);
+        }
+        e.bytes(c.encode_utf8(&mut [0; 4]).as_bytes())?;
+    }
+    Ok(())
 }
 /// Member `name` of `parent` unless it is absent or null.
 fn present(doc: &Document, parent: usize, name: &str) -> Result<Option<usize>> {

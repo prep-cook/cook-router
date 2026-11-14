@@ -214,6 +214,26 @@ impl State {
             )?;
             return Ok(());
         }
+        // An event under another name is not a response body; it travels whole as text.
+        if let Some(name) = event.name(source)?
+            && !source.equals(name, b"message")?
+        {
+            if self.base.is_none() {
+                let empty = super::mapped(owner, |e| e.bytes(b"{}"))?;
+                self.start(owner, &empty)?;
+            }
+            self.emitter.emit(
+                owner,
+                Kind::Opaque,
+                Scope::default(),
+                |e| {
+                    e.bytes(b",\"name\":\"gemini.event\",\"format\":\"text\",\"value\":")?;
+                    e.quoted_json(|e| event.write_data(source, |bytes| e.bytes(bytes)))
+                },
+                |e| sse_source(source, event, e),
+            )?;
+            return Ok(());
+        }
         let doc = super::mapped(owner, |e| event.write_data(source, |bytes| e.bytes(bytes)))?;
         self.body(owner, &doc)?;
         if event
