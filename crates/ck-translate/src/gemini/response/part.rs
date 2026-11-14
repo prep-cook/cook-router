@@ -24,6 +24,23 @@ const PART_KNOWN: &[&str] = &[
 const CALL_KNOWN: &[&str] = &["id", "name", "args"];
 const INLINE_KNOWN: &[&str] = &["mimeType", "data"];
 
+/// The part and its call and inline data, with the pointer prefix and known members of each.
+type Groups = [(usize, &'static str, &'static [&'static str]); 3];
+fn groups(doc: &Document, part: usize) -> Result<(Groups, usize)> {
+    let mut groups = [(part, "", PART_KNOWN); 3];
+    let mut count = 1;
+    for (name, pointer, known) in [
+        ("functionCall", "/functionCall", CALL_KNOWN),
+        ("inlineData", "/inlineData", INLINE_KNOWN),
+    ] {
+        if let Some(n) = doc.member(part, name)? {
+            groups[count] = (n, pointer, known);
+            count += 1;
+        }
+    }
+    Ok((groups, count))
+}
+
 impl State {
     pub(super) fn part(&mut self, owner: &mut Writer, doc: &Document, part: usize, slot: usize) -> Result<()> {
         super::super::object(doc, part)?;
@@ -61,17 +78,7 @@ impl State {
             |e| e.bytes(b",\"kind\":\"message\",\"role\":\"assistant\""),
             |_| Ok(()),
         )?;
-        let mut groups = [(part, "", PART_KNOWN); 3];
-        let mut count = 1;
-        for (name, pointer, known) in [
-            ("functionCall", "/functionCall", CALL_KNOWN),
-            ("inlineData", "/inlineData", INLINE_KNOWN),
-        ] {
-            if let Some(n) = doc.member(part, name)? {
-                groups[count] = (n, pointer, known);
-                count += 1;
-            }
-        }
+        let (groups, count) = groups(doc, part)?;
         self.emitter.emit(
             owner,
             Kind::BlockStart,
