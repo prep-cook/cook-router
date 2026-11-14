@@ -52,6 +52,7 @@ fn fields(doc: &Document, root: usize, e: &mut Encoder<'_, '_>) -> Result<bool> 
             "tool_choice",
             "parallel_tool_calls",
             "response_format",
+            "max_completion_tokens",
         ]
         .iter()
         .try_fold(false, |yes, key| Ok::<_, Error>(yes || doc.name_is(name, key)?))?
@@ -93,7 +94,7 @@ fn messages(view: RequestView<'_>, root: usize, e: &mut Encoder<'_, '_>) -> Resu
     let mut first_message = true;
     let mut system = None;
     for (message_index, message) in doc.children(messages)?.enumerate() {
-        if super::is(doc, message, "role", "system")? {
+        if super::is(doc, message, "role", "system")? || super::is(doc, message, "role", "developer")? {
             if system.is_some() {
                 return Err(Error::Unsupported);
             }

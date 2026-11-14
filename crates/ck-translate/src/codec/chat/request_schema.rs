@@ -262,6 +262,9 @@ fn content_part(doc: &Document, media: &Registry, part: usize) -> Result<()> {
         }
         return Ok(());
     }
+    if doc.string_is(kind, "tool_result")? {
+        return tool_result(doc, part);
+    }
     if doc.string_is(kind, "opaque")? {
         enumeration(doc, doc.required(part, "protocol")?, &["chat"])?;
         doc.required(part, "value")?;
@@ -298,6 +301,24 @@ fn content_part(doc: &Document, media: &Registry, part: usize) -> Result<()> {
         number(doc, doc.required(timing, "start")?)?;
         optional(doc, timing, "end", number)?;
         enumeration(doc, doc.required(timing, "unit")?, &["seconds", "milliseconds"])
+    })
+}
+
+/// A tool result in a user turn, which request egress writes as a `tool` message: text parts
+/// only, and no Gemini-native `result` object.
+fn tool_result(doc: &Document, part: usize) -> Result<()> {
+    require_string(doc, doc.required(part, "tool_call_id")?)?;
+    if doc.member(part, "result")?.is_some() {
+        return Err(Error::Unsupported);
+    }
+    optional(doc, part, "is_error", boolean)?;
+    optional(doc, part, "content", |doc, content| {
+        array(doc, content)?;
+        for item in doc.children(content)? {
+            enumeration(doc, doc.required(item, "type")?, &["text"])?;
+            require_string(doc, doc.required(item, "text")?)?;
+        }
+        Ok(())
     })
 }
 

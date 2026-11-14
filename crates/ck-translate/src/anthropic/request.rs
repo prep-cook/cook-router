@@ -153,14 +153,18 @@ pub struct Egress {
     pub default_max_tokens: Option<u64>,
 }
 impl Egress {
-    /// Writes `,"max_tokens":` with the default when a generation request has none.
+    /// Writes `,"max_tokens":` when a generation request has none: its `max_completion_tokens`,
+    /// else the default.
     pub(super) fn fill_max_tokens(&self, view: RequestView<'_>, e: &mut encode::Encoder<'_, '_>) -> Result<()> {
-        if view.operation != Operation::Generate || view.document.member(view.document.root(), "max_tokens")?.is_some()
-        {
+        let (doc, root) = (view.document, view.document.root());
+        if view.operation != Operation::Generate || doc.member(root, "max_tokens")?.is_some() {
             return Ok(());
         }
         e.bytes(b",\"max_tokens\":")?;
-        e.unsigned(self.default_max_tokens.ok_or(Error::Schema)?)
+        match doc.member(root, "max_completion_tokens")? {
+            Some(limit) => doc.write(limit, e),
+            None => e.unsigned(self.default_max_tokens.ok_or(Error::Schema)?),
+        }
     }
 }
 impl codec::RequestEgress for Egress {
