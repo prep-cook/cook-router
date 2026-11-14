@@ -2,7 +2,7 @@
 use super::*;
 use gemini::response::Framing;
 
-fn result_ids(canonical: &[Value], message: usize) -> Vec<Value> {
+pub(super) fn result_ids(canonical: &[Value], message: usize) -> Vec<Value> {
     let prefix = format!("/messages/{message}/content/");
     canonical
         .iter()

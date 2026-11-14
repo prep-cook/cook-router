@@ -222,3 +222,21 @@ fn metadata_only_late_identity_reaches_egress() {
         );
     }
 }
+
+/// An explicit response id answers its call, so a later response without an id takes the
+/// next call of that name rather than the same one.
+#[test]
+fn explicit_response_ids_consume_their_call() {
+    for (first, second) in [("a", "b"), ("b", "a")] {
+        let input = json!({"contents":[
+            {"role":"model","parts":[{"functionCall":{"id":"a","name":"f","args":{}}},{"functionCall":{"id":"b","name":"f","args":{}}}]},
+            {"role":"user","parts":[{"functionResponse":{"id":first,"name":"f","response":{}}},{"functionResponse":{"name":"f","response":{}}}]}
+        ]});
+        let (out, canonical) = request(&input, Operation::Generate);
+        assert_eq!(out, input);
+        assert_eq!(
+            super::regressions::result_ids(&canonical, 1),
+            [json!(first), json!(second)]
+        );
+    }
+}

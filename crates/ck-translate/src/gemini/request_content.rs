@@ -191,10 +191,11 @@ fn tool_result(doc: &mut Document, part: usize, result: usize, place: Place, cal
     let name = doc.required(result, "name")?;
     super::string(doc, name)?;
     if let Some(id) = doc.remove(result, "id")? {
+        calls.answer(doc, name, Some(id))?;
         doc.rename(id, "tool_call_id")?;
         doc.append(part, id)?;
     } else {
-        let linked = calls.answer(doc, name)?.ok_or(Error::Schema)?;
+        let linked = calls.answer(doc, name, None)?.ok_or(Error::Schema)?;
         let id = doc.node(doc.required(linked, "id")?)?.value;
         doc.set(part, "tool_call_id", id)?;
         doc.set(place.entry, "synthetic_id", Value::Bool(true))?;
@@ -260,8 +261,8 @@ impl Calls {
         self.sorted = false;
         Ok(())
     }
-    /// The first unanswered call named `name`, now answered.
-    fn answer(&mut self, doc: &Document, name: usize) -> Result<Option<usize>> {
+    /// The first unanswered call named `name`, or the one with `id`, now answered.
+    fn answer(&mut self, doc: &Document, name: usize, id: Option<usize>) -> Result<Option<usize>> {
         if !self.sorted {
             self.entries.sort_unstable_by_key(|c| (c.key, c.order));
             self.sorted = true;
@@ -272,9 +273,12 @@ impl Calls {
         let taken = self.entries.get(start).map_or(0, |c| c.taken);
         let first = start + taken;
         for index in first..end {
-            if doc.equal_strings(self.entries[index].name, name)? {
-                // Only a hash collision puts another name first; moving the match to the
-                // front keeps the answered calls a prefix and the others in order.
+            let part = self.entries[index].part;
+            if doc.equal_strings(self.entries[index].name, name)?
+                && id.map_or(Ok(true), |id| doc.equal_strings(doc.required(part, "id")?, id))?
+            {
+                // A hash collision or an explicit id can match a later call; moving the match
+                // to the front keeps the answered calls a prefix and the others in order.
                 self.entries[first..=index].rotate_right(1);
                 self.entries[start].taken = taken + 1;
                 return Ok(Some(self.entries[first].part));
