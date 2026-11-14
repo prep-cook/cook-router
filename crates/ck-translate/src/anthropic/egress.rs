@@ -143,7 +143,7 @@ impl Egress {
         let origin = self.start_origin.take();
         output(native_event(owner, "message_start", origin.as_ref(), |e| {
             e.bytes(b",\"message\":{")?;
-            write_base(base, e)?;
+            write_base(base, None, e)?;
             if let Some(doc) = &origin {
                 original_members_at(doc, doc.required(doc.root(), "x_ck")?, "/message", e)?;
             }
@@ -367,13 +367,14 @@ fn native_sse_fields(doc: &Document, source: usize, e: &mut Encoder<'_, '_>) -> 
     }
     Ok(())
 }
-fn write_base(doc: &Document, e: &mut Encoder<'_, '_>) -> Result<()> {
+/// Writes the message base; unknown members that `later` also has are left to `later`.
+fn write_base(doc: &Document, later: Option<&Document>, e: &mut Encoder<'_, '_>) -> Result<()> {
     e.bytes(b"\"type\":\"message\",\"role\":\"assistant\"")?;
     for key in ["id", "model"] {
         member(doc, doc.root(), key, e)?;
     }
     if let Some(x) = doc.member(doc.root(), "x_ck")? {
-        original_members(doc, x, e)?;
+        original_members_with_separator(doc, x, "", true, later, e)?;
     }
     Ok(())
 }
@@ -434,13 +435,15 @@ fn original_members(doc: &Document, x: usize, e: &mut Encoder<'_, '_>) -> Result
     original_members_at(doc, x, "", e)
 }
 fn original_members_at(doc: &Document, x: usize, prefix: &str, e: &mut Encoder<'_, '_>) -> Result<()> {
-    original_members_with_separator(doc, x, prefix, true, e)
+    original_members_with_separator(doc, x, prefix, true, None, e)
 }
+/// Writes the unknown native members under `prefix`, except those `later` also has at its root.
 fn original_members_with_separator(
     doc: &Document,
     x: usize,
     prefix: &str,
     mut separator: bool,
+    later: Option<&Document>,
     e: &mut Encoder<'_, '_>,
 ) -> Result<()> {
     if let Some(original) = doc.member(x, "original")? {
@@ -464,6 +467,11 @@ fn original_members_with_separator(
                     continue 'entry;
                 }
             }
+            if let Some(later) = later
+                && replaced(doc, pointer, prefix, later)?
+            {
+                continue;
+            }
             if separator {
                 e.bytes(b",")?;
             }
@@ -486,6 +494,33 @@ fn original_members_with_separator(
         }
     }
     Ok(())
+}
+/// Whether `later`'s root has a member named by the last token of `pointer`, below `prefix`.
+fn replaced(doc: &Document, pointer: usize, prefix: &str, later: &Document) -> Result<bool> {
+    for child in later.children(later.root())? {
+        let mut name = later.name_chars(later.node(child)?.name.ok_or(Error::Schema)?)?;
+        let mut token = doc.chars(pointer)?;
+        for _ in 0..prefix.chars().count() + 1 {
+            token.next_scalar()?;
+        }
+        loop {
+            let c = match token.next_scalar()? {
+                Some('~') => match token.next_scalar()? {
+                    Some('0') => Some('~'),
+                    Some('1') => Some('/'),
+                    _ => return Err(Error::Schema),
+                },
+                c => c,
+            };
+            if c != name.next_scalar()? {
+                break;
+            }
+            if c.is_none() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 fn write_opaque(doc: &Document, x: usize, e: &mut Encoder<'_, '_>) -> Result<()> {
     let source = doc.required(x, "source")?;

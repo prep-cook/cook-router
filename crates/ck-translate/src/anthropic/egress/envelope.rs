@@ -131,7 +131,7 @@ impl Egress {
                     self.begin(owner, output)?;
                     output(native_event(owner, "message_delta", Some(&doc), |e| {
                         e.bytes(b",\"delta\":{")?;
-                        original_members_with_separator(&doc, x, "/delta", false, e)?;
+                        original_members_with_separator(&doc, x, "/delta", false, None, e)?;
                         e.bytes(b"}")?;
                         if let Some(usage) = &self.usage {
                             e.bytes(b",\"usage\":")?;
@@ -242,9 +242,12 @@ impl Egress {
     }
     pub(super) fn buffered(&self, e: &mut Encoder<'_, '_>) -> Result<()> {
         e.bytes(b"{")?;
-        write_base(self.base.as_ref().ok_or(Error::Schema)?, e)?;
+        // message_delta repeats members such as `container`; its later value wins.
+        let finish = self.finish.as_ref().ok_or(Error::Schema)?;
+        write_base(self.base.as_ref().ok_or(Error::Schema)?, Some(finish), e)?;
         if let Some(origin) = &self.start_origin {
-            original_members_at(origin, origin.required(origin.root(), "x_ck")?, "/message", e)?;
+            let x = origin.required(origin.root(), "x_ck")?;
+            original_members_with_separator(origin, x, "/message", true, Some(finish), e)?;
         }
         e.bytes(b",\"content\":[")?;
         for (index, block) in self.blocks.iter().enumerate() {
@@ -254,7 +257,6 @@ impl Egress {
             object(&block.document, block.document.root(), &["partial_json"], e)?;
         }
         e.bytes(b"]")?;
-        let finish = self.finish.as_ref().ok_or(Error::Schema)?;
         for field in finish.children(finish.root())? {
             e.bytes(b",")?;
             finish.write_name(finish.node(field)?.name.ok_or(Error::Schema)?, e)?;

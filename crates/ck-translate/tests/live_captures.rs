@@ -206,3 +206,31 @@ fn streamed_replay_keeps_the_signature_and_sends_no_empty_delta() {
         }
     }
 }
+
+#[test]
+fn buffered_body_from_a_stream_writes_finish_members_once() {
+    let output = run(
+        Source::Anthropic,
+        BodyMode::Streaming,
+        &fixture("a1b_chat_stream.sse"),
+        Client::Anthropic,
+        BodyMode::Buffered,
+    );
+    let text = std::str::from_utf8(&output).unwrap();
+    for key in ["\"container\"", "\"stop_details\""] {
+        assert_eq!(text.matches(key).count(), 1, "{text}");
+    }
+    // The message_delta value replaces the message_start one, also after a leading ping.
+    let rows = [
+        json!({"type":"ping"}),
+        json!({"type":"message_start","message":{"id":"m","model":"c","role":"assistant","content":[],"stop_details":null,"usage":{"input_tokens":1,"output_tokens":0}}}),
+        json!({"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal"}},"usage":{"output_tokens":0}}),
+        json!({"type":"message_stop"}),
+    ];
+    let input: String = rows.iter().map(|r| format!("event: {}\ndata: {r}\n\n", r["type"].as_str().unwrap())).collect();
+    let output = run(Source::Anthropic, BodyMode::Streaming, input.as_bytes(), Client::Anthropic, BodyMode::Buffered);
+    let text = std::str::from_utf8(&output).unwrap();
+    assert_eq!(text.matches("\"stop_details\"").count(), 1, "{text}");
+    assert_eq!(serde_json::from_str::<Value>(text).unwrap()["stop_details"], json!({"type":"refusal"}));
+}
+
