@@ -124,7 +124,11 @@ impl Egress {
             .transpose()?
             .flatten()
         {
-            Some(ids) => event.member(ids, "id")?,
+            // A Responses source names the call by `call_id`; its `id` is the output item's.
+            Some(ids) => match event.member(ids, "call_id")? {
+                Some(id) => Some(id),
+                None => event.member(ids, "id")?,
+            },
             None => None,
         };
         let block = self.block(&event)?;

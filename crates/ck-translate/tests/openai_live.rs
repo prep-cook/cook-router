@@ -270,6 +270,36 @@ fn chat_and_responses_tool_calls_reach_gemini_clients() {
 }
 
 #[test]
+fn gemini_function_calls_carry_the_upstream_call_id() {
+    let call_id = "call_1a3425a5046f46e085ecc0bb2612582b";
+    assert!(std::str::from_utf8(RELAY_RESPONSES_TOOL).unwrap().contains(call_id));
+    for framing in [Framing::Json, Framing::Sse] {
+        let client = Client::Gemini(framing);
+        let (out, failure) = decode(
+            Upstream::Responses,
+            RELAY_RESPONSES_TOOL,
+            BodyMode::Streaming,
+            61,
+            client,
+        );
+        assert_eq!(failure, None);
+        assert_eq!(gemini_calls(&out, framing)[0]["id"], call_id);
+    }
+    // A Chat source names the call by its only id.
+    let (out, _) = decode(
+        Upstream::Chat,
+        DS_THINKING,
+        BodyMode::Buffered,
+        61,
+        Client::Gemini(Framing::Json),
+    );
+    assert_eq!(
+        gemini_calls(&out, Framing::Json)[0]["id"],
+        "call_00_IQ3bCNZTE5DQFFdL3Fxx3006"
+    );
+}
+
+#[test]
 fn responses_error_event_ends_every_client_with_an_upstream_failure() {
     assert!(std::str::from_utf8(OPENAI_ERROR).unwrap().contains("event: error"));
     for client in CLIENTS {
