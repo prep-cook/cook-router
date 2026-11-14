@@ -120,6 +120,8 @@ fn signed_thinking_history_reaches_chat_as_visible_reasoning_only() {
     let output = anthropic_to_chat(&input).unwrap();
     assert_eq!(output["messages"][2]["reasoning_content"], "first");
     assert_eq!(output["messages"][2]["tool_calls"][0]["id"], "c");
+    // Chat requires a nonempty content array; thinking plus tool_use leaves none.
+    assert_eq!(output["messages"][2]["content"], "");
     assert_eq!(
         output["messages"][4],
         json!({"role":"assistant","content":[{"type":"text","text":"answer"}],"reasoning_content":"second\nthird"})
@@ -157,4 +159,20 @@ fn chat_max_tokens_reaches_anthropic_from_the_request_or_the_capability_default(
         7
     );
     assert_eq!(from_chat(&input(Some(7)), default(None)).unwrap()["max_tokens"], 7);
+}
+
+#[test]
+fn claude_history_left_without_parts_reaches_chat_with_empty_text() {
+    let turn = |blocks: Value| {
+        json!({"model":"m","max_tokens":10,"tools":[{"name":"f","input_schema":{"type":"object"}}],"messages":[
+            {"role":"user","content":"q"},
+            {"role":"assistant","content":blocks},
+            {"role":"user","content":"next"},
+        ]})
+    };
+    let redacted = anthropic_to_chat(&turn(json!([{"type":"redacted_thinking","data":"opaque"}]))).unwrap();
+    assert_eq!(redacted["messages"][1], json!({"role":"assistant","content":""}));
+    let tool = anthropic_to_chat(&turn(json!([{"type":"tool_use","id":"c","name":"f","input":{}}]))).unwrap();
+    assert_eq!(tool["messages"][1]["content"], "");
+    assert_eq!(tool["messages"][1]["tool_calls"][0]["id"], "c");
 }

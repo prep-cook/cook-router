@@ -147,23 +147,25 @@ fn write_message(view: RequestView<'_>, message: usize, _message_index: u64, e: 
     e.bytes(b"}")
 }
 /// Writes a content array; for Claude history it leaves out thinking, which
-/// [`write_reasoning`] carries, and redacted blocks, which Chat cannot replay.
+/// [`write_reasoning`] carries, and redacted blocks, which Chat cannot replay. Chat requires at
+/// least one part in a content array, so Claude history left with none becomes `""`.
 fn write_content(view: RequestView<'_>, content: usize, claude: bool, e: &mut Encoder<'_, '_>) -> Result<()> {
     let doc = view.document;
-    e.bytes(b"[")?;
     let mut first = true;
     for part in doc.children(content)? {
         let kind = doc.required(part, "type")?;
         if claude && (doc.string_is(kind, "reasoning")? || doc.string_is(kind, "redacted")?) {
             continue;
         }
-        if !first {
-            e.bytes(b",")?;
-        }
+        e.bytes(if first { b"[" } else { b"," })?;
         first = false;
         write_part(view, part, e)?;
     }
-    e.bytes(b"]")
+    e.bytes(match (first, claude) {
+        (false, _) => b"]".as_slice(),
+        (true, true) => b"\"\"",
+        (true, false) => b"[]",
+    })
 }
 /// Writes the visible thinking of Claude history as `reasoning_content`, blocks joined by a
 /// newline; signatures stay behind (owner ruling 2026-11-15).
