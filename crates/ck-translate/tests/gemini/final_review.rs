@@ -197,3 +197,28 @@ fn create_time_becomes_unix_seconds() {
         assert_eq!(serde_json::from_slice::<Value>(&out).unwrap()["createTime"], time);
     }
 }
+
+/// An identity that arrives in a body without candidates still reaches canonical consumers
+/// and the Gemini client, createTime included.
+#[test]
+fn metadata_only_late_identity_reaches_egress() {
+    let rows = [
+        json!({"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}),
+        json!({"responseId":"late","modelVersion":"late-m","createTime":"2026-11-15T00:00:00Z","usageMetadata":{"promptTokenCount":1}}),
+    ];
+    for downstream in [Framing::Json, Framing::Sse] {
+        let (out, canonical) = response(&sse(&rows), Framing::Sse, downstream, Operation::Generate);
+        let last = match downstream {
+            Framing::Json => serde_json::from_slice::<Value>(&out).unwrap(),
+            _ => events(&out).pop().unwrap(),
+        };
+        assert_eq!(last["responseId"], "late", "{last}");
+        assert_eq!(last["modelVersion"], "late-m");
+        assert_eq!(last["createTime"], "2026-11-15T00:00:00Z");
+        let chunk = canonical.iter().rev().find(|v| v.get("choices").is_some()).unwrap();
+        assert_eq!(
+            (&chunk["id"], &chunk["model"], &chunk["created"]),
+            (&json!("late"), &json!("late-m"), &json!(1_794_700_800))
+        );
+    }
+}

@@ -172,23 +172,26 @@ impl Egress {
         })?);
         Ok(())
     }
-    /// Takes a native chunk's `id` and `model` into the identity when they differ from it, so
-    /// an identity the upstream supplied after the response start reaches the client.
+    /// Takes a native chunk's `id`, `model` and source timestamp into the identity when they
+    /// differ from it, so an identity the upstream supplied after the response start reaches
+    /// the client.
     fn refresh(&mut self, owner: &mut Writer, event: &Document, x: usize) -> Result<()> {
         let root = event.root();
         let identity = self.identity.as_ref().ok_or(Error::Schema)?;
-        let mut supplied = [None; 2];
+        let source = event.member(x, "source")?;
+        let mut supplied = [None; 3];
+        for (slot, canonical) in supplied.iter_mut().zip(["id", "model", "timestamp"]) {
+            *slot = match canonical {
+                "timestamp" => source.map(|s| event.member(s, canonical)).transpose()?.flatten(),
+                _ if synthetic(event, x, canonical)? => None,
+                _ => event.member(root, canonical)?,
+            };
+        }
+        let names = ["responseId", "modelVersion", "createTime"];
         let mut changed = false;
-        for (slot, (canonical, native)) in supplied
-            .iter_mut()
-            .zip([("id", "responseId"), ("model", "modelVersion")])
-        {
-            if synthetic(event, x, canonical)? {
-                continue;
-            }
-            *slot = event.member(root, canonical)?;
-            if let Some(node) = *slot {
-                changed |= match identity.member(identity.root(), native)? {
+        for (name, node) in names.into_iter().zip(supplied) {
+            if let Some(node) = node {
+                changed |= match identity.member(identity.root(), name)? {
                     Some(current) => !super::same(identity, current, event, node)?,
                     None => true,
                 };
@@ -200,7 +203,6 @@ impl Egress {
         let refreshed = mapped(owner, |e| {
             e.bytes(b"{")?;
             let mut first = true;
-            let names = ["responseId", "modelVersion"];
             for (name, node) in names.into_iter().zip(supplied) {
                 if let Some(node) = node {
                     e.bytes(if std::mem::replace(&mut first, false) {

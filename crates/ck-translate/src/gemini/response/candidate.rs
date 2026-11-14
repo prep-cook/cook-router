@@ -155,7 +155,8 @@ impl State {
         Ok(base)
     }
     /// Rebuilds the base when a later body supplies an identity that differs from the
-    /// published one, so later chunks carry it.
+    /// published one, and publishes it in a chunk without choices, so the change reaches
+    /// consumers even when the body has no candidate.
     fn refresh(&mut self, owner: &mut Writer, doc: &Document) -> Result<()> {
         let base = self.base.as_ref().ok_or(Error::Schema)?;
         let root = doc.root();
@@ -169,9 +170,35 @@ impl State {
                 changed |= synthetic || !super::super::same(base, base.required(base.root(), canonical)?, doc, n)?;
             }
         }
-        if changed {
-            self.base = Some(self.base_fields(owner, doc)?);
+        let time = doc.member(root, "createTime")?;
+        if let Some(n) = time {
+            let created = base.unsigned(base.required(base.root(), "created")?)?;
+            changed |= unix_seconds(doc, n)?.is_some_and(|t| t != created);
         }
+        if !changed {
+            return Ok(());
+        }
+        let base = self.base_fields(owner, doc)?;
+        let synthetic = self.synthetic;
+        self.emitter.emit(
+            owner,
+            Kind::Chunk,
+            Scope::default(),
+            |e| {
+                super::super::members(&base, base.root(), &[], e)?;
+                e.bytes(b",\"object\":\"chat.completion.chunk\",\"choices\":[]")
+            },
+            |e| {
+                e.bytes(b",\"source\":{\"protocol\":\"gemini\"")?;
+                if let Some(n) = time {
+                    e.bytes(b",\"timestamp\":")?;
+                    doc.write(n, e)?;
+                }
+                e.bytes(b"}")?;
+                super::synthetic(synthetic, false, e)
+            },
+        )?;
+        self.base = Some(base);
         Ok(())
     }
     fn count(&mut self, owner: &mut Writer, doc: &Document) -> Result<()> {

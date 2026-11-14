@@ -20,14 +20,14 @@ impl Egress {
     ) -> Result<()> {
         let root = event.root();
         let x = event.required(root, "x_ck")?;
+        if native(&event, x)? {
+            self.refresh(owner, &event, x)?;
+        }
         let Some(choice) = event.node(event.required(root, "choices")?)?.first else {
             return Ok(());
         };
         if event.node(choice)?.next.is_some() {
             return Err(Error::Schema);
-        }
-        if native(&event, x)? {
-            self.refresh(owner, &event, x)?;
         }
         let slot = self.open_choice(event.unsigned(event.required(choice, "index")?)?)?;
         let logprobs = match present(&event, choice, "logprobs")? {
