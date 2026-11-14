@@ -226,3 +226,25 @@ fn response_file_data_fails_where_it_cannot_be_written() {
         })));
     }
 }
+
+/// Chat's `allowed_tools` choice has no Gemini mapping yet and is refused at the fence.
+#[test]
+fn chat_allowed_tools_choice_is_refused_at_the_gemini_fence() {
+    let input = json!({"model":"m","messages":[{"role":"user","content":"q"}],
+        "tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],
+        "tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"f"}}]}}});
+    let mut m = Mapped::new();
+    let mut ingress = codec::chat::request::Ingress::new(
+        &mut m.writer,
+        &m.store,
+        identity(Direction::Request),
+        Operation::Generate,
+        1024 * 1024,
+    )
+    .unwrap();
+    ingress
+        .advance(&mut m.writer, &serde_json::to_vec(&input).unwrap())
+        .unwrap();
+    let result = ingress.finish(&mut m.writer, &gemini::request::GeminiCapability);
+    assert!(matches!(result, Err(codec::Error::Unsupported)));
+}
