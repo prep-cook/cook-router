@@ -179,6 +179,27 @@ fn final_response(out: &[u8], downstream: BodyMode) -> Value {
     }
 }
 
+/// Every function call part of a Gemini client body, buffered or streamed.
+fn gemini_calls(out: &[u8], framing: Framing) -> Vec<Value> {
+    let records = match framing {
+        Framing::Sse => events(out),
+        _ => vec![serde_json::from_slice(out).unwrap()],
+    };
+    let mut calls = Vec::new();
+    for record in records {
+        for part in record["candidates"][0]["content"]["parts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if !part["functionCall"].is_null() {
+                calls.push(part["functionCall"].clone());
+            }
+        }
+    }
+    calls
+}
+
 #[test]
 fn chat_null_logprobs_reach_responses_clients() {
     let source: Value = serde_json::from_slice(DS_TEXT).unwrap();
@@ -229,6 +250,26 @@ fn chat_null_content_beside_tool_calls_reaches_responses_clients() {
 }
 
 #[test]
+fn chat_and_responses_tool_calls_reach_gemini_clients() {
+    for (upstream, input, mode, count) in [
+        (Upstream::Chat, DS_TOOLS, BodyMode::Streaming, 2),
+        (Upstream::Chat, DS_THINKING, BodyMode::Buffered, 1),
+        (Upstream::Responses, RELAY_RESPONSES_TOOL, BodyMode::Streaming, 1),
+    ] {
+        for framing in [Framing::Json, Framing::Sse] {
+            let (out, failure) = decode(upstream, input, mode, 61, Client::Gemini(framing));
+            assert_eq!(failure, None);
+            let calls = gemini_calls(&out, framing);
+            assert_eq!(calls.len(), count, "{}", String::from_utf8_lossy(&out));
+            for call in calls {
+                assert_eq!(call["name"], "get_weather");
+                assert!(call["args"]["city"].is_string());
+            }
+        }
+    }
+}
+
+#[test]
 fn responses_error_event_ends_every_client_with_an_upstream_failure() {
     assert!(std::str::from_utf8(OPENAI_ERROR).unwrap().contains("event: error"));
     for client in CLIENTS {
@@ -245,10 +286,7 @@ fn responses_error_event_ends_every_client_with_an_upstream_failure() {
 #[test]
 fn blank_lines_after_the_responses_terminal_event_are_ignored() {
     assert!(RELAY_RESPONSES_TOOL.ends_with(b"}\n\n\n"));
-    for client in [
-        Client::Responses(BodyMode::Buffered),
-        Client::Responses(BodyMode::Streaming),
-    ] {
+    for client in CLIENTS {
         for step in [61, RELAY_RESPONSES_TOOL.len() - 1] {
             let (_, failure) = decode(
                 Upstream::Responses,
