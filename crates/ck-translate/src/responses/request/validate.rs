@@ -45,6 +45,14 @@ pub(super) fn validate(view: RequestView<'_>) -> Result<()> {
             return Err(Error::Unsupported);
         }
     }
+    // ponytail: Chat's nested `allowed_tools` choice is refused; projecting it onto Responses'
+    // flat `mode`/`tools` spelling lifts this.
+    if let Some(choice) = doc.member(root, "tool_choice")?
+        && matches!(doc.node(choice)?.value, Value::Object)
+        && doc.member(choice, "allowed_tools")?.is_some()
+    {
+        return Err(Error::Unsupported);
+    }
     let messages = doc.required(root, "messages")?;
     if !matches!(doc.node(messages)?.value, Value::Array) {
         return Err(Error::Schema);

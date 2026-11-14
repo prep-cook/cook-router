@@ -109,6 +109,23 @@ fn tool_choice(doc: &Document, choice: usize) -> Result<()> {
         return enumeration(doc, choice, &["auto", "none", "required"]);
     }
     let kind = doc.required(choice, "type")?;
+    if doc.string_is(kind, "allowed_tools")? {
+        let allowed = doc.required(choice, "allowed_tools")?;
+        object(doc, allowed)?;
+        enumeration(doc, doc.required(allowed, "mode")?, &["auto", "required"])?;
+        let list = doc.required(allowed, "tools")?;
+        array(doc, list)?;
+        for tool in doc.children(list)? {
+            declared(doc, tool)?;
+        }
+        return Ok(());
+    }
+    declared(doc, choice)
+}
+
+/// Checks that `choice` names one declared function or custom tool.
+fn declared(doc: &Document, choice: usize) -> Result<()> {
+    let kind = doc.required(choice, "type")?;
     enumeration(doc, kind, &["function", "custom"])?;
     let name = if doc.string_is(kind, "custom")? {
         "custom"
@@ -198,8 +215,13 @@ fn x_ck(doc: &Document, root: usize) -> Result<()> {
         for entry in doc.children(list)? {
             doc.unsigned(doc.required(entry, "message_index")?)?;
             doc.unsigned(doc.required(entry, "block_index")?)?;
-            for key in ["item_id", "kind", "source"] {
+            for key in ["item_id", "kind"] {
                 require_string(doc, doc.required(entry, key)?)?;
+            }
+            // Anthropic ingress records its source as `{protocol}`.
+            let source = doc.required(entry, "source")?;
+            if !matches!(doc.node(source)?.value, Value::Object) {
+                require_string(doc, source)?;
             }
             optional(doc, entry, "signature", require_string)?;
         }
@@ -221,6 +243,10 @@ fn content_part(doc: &Document, media: &Registry, part: usize) -> Result<()> {
         let x = doc.required(doc.root(), "x_ck")?;
         let replay = doc.required(x, "replay")?;
         let entry = doc.children(replay)?.nth(index).ok_or(Error::Schema)?;
+        // Anthropic counts wire blocks, tool_use included; its own fence checks the binding.
+        if doc.string_is(doc.required(entry, "kind")?, "anthropic")? {
+            return Ok(());
+        }
         let content = doc.node(part)?.parent.ok_or(Error::Schema)?;
         let message = doc.node(content)?.parent.ok_or(Error::Schema)?;
         let messages = doc.required(doc.root(), "messages")?;

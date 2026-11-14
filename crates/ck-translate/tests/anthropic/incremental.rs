@@ -13,11 +13,12 @@ fn ingress(mapped: &mut Mapped) -> anthropic::request::Ingress {
 }
 fn finish(mapped: &mut Mapped, ingress: &mut anthropic::request::Ingress) -> Value {
     let ready = ingress
-        .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability)
+        .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability::default())
         .unwrap();
     let out = anthropic::request::Egress {
         destination: "anthropic",
         upstream_stream: false,
+        default_max_tokens: None,
     }
     .encode(&ready, &mut mapped.writer)
     .unwrap();
@@ -136,7 +137,7 @@ fn streamed_prefix_never_authorizes_late_invalid_request() {
         assert_prefix(&mapped);
         let failed = input.advance(&mut mapped.writer, suffix.as_bytes()).is_err()
             || input
-                .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability)
+                .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability::default())
                 .is_err();
         assert!(failed);
         let output = mapped.output(&mapped.writer);

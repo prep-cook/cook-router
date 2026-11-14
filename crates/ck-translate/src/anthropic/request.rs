@@ -68,11 +68,15 @@ impl Ingress {
             &mut self.reader,
             &mut self.published_media,
         )?;
-        super::request_schema::validate(RequestView {
-            document: &doc,
-            media: &self.media,
-            operation: self.operation,
-        })?;
+        // Anthropic clients send `max_tokens` themselves.
+        super::request_schema::validate(
+            RequestView {
+                document: &doc,
+                media: &self.media,
+                operation: self.operation,
+            },
+            None,
+        )?;
         for media in self.media.entries().filter(|media| media.data.is_some()) {
             media::bytes(&doc, media, |_| Ok(()))?;
         }
@@ -128,18 +132,36 @@ impl codec::RequestIngress for Ingress {
         crate::boundary::end_request(&mut self.fence, view, destination, &mut self.emitter, owner)
     }
 }
-pub struct AnthropicCapability;
+#[derive(Clone, Copy, Default)]
+pub struct AnthropicCapability {
+    /// `max_tokens` for a generation request without one: the per-model setting, else the
+    /// model's output maximum (owner ruling 2026-11-15). `None` refuses such a request.
+    pub default_max_tokens: Option<u64>,
+}
 impl Capability for AnthropicCapability {
     fn destination(&self) -> &'static str {
         "anthropic"
     }
     fn validate(&self, view: RequestView<'_>) -> Result<()> {
-        super::request_schema::validate(view)
+        super::request_schema::validate(view, self.default_max_tokens)
     }
 }
 pub struct Egress {
     pub destination: &'static str,
     pub upstream_stream: bool,
+    /// The [`AnthropicCapability::default_max_tokens`] the request passed.
+    pub default_max_tokens: Option<u64>,
+}
+impl Egress {
+    /// Writes `,"max_tokens":` with the default when a generation request has none.
+    pub(super) fn fill_max_tokens(&self, view: RequestView<'_>, e: &mut encode::Encoder<'_, '_>) -> Result<()> {
+        if view.operation != Operation::Generate || view.document.member(view.document.root(), "max_tokens")?.is_some()
+        {
+            return Ok(());
+        }
+        e.bytes(b",\"max_tokens\":")?;
+        e.unsigned(self.default_max_tokens.ok_or(Error::Schema)?)
+    }
 }
 impl codec::RequestEgress for Egress {
     fn encode(&self, request: &ValidatedRequest<'_>, owner: &mut Writer) -> Result<ScratchLease> {
@@ -148,7 +170,7 @@ impl codec::RequestEgress for Egress {
         if view.operation == Operation::Compact || (view.operation == Operation::CountTokens && self.upstream_stream) {
             return Err(Error::Unsupported);
         }
-        encode::scratch(owner, |e| super::request_encode::write(view, self.upstream_stream, e))
+        encode::scratch(owner, |e| super::request_encode::write(view, self, e))
     }
 }
 fn normalize(owner: &mut Writer, doc: &mut Document, operation: Operation) -> Result<()> {
@@ -290,7 +312,10 @@ fn controls(doc: &mut Document, root: usize, x: usize) -> Result<(usize, usize)>
             doc.rename(format, "json_schema")?;
             doc.append(response, format)?;
         }
-        doc.append(native, output)?;
+        // An emptied object carries nothing, and a kept one would trip foreign fences.
+        if doc.node(output)?.first.is_some() {
+            doc.append(native, output)?;
+        }
     }
     Ok((provider, native))
 }

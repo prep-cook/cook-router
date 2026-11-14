@@ -4,7 +4,7 @@ use crate::codec::{
     encode::Encoder,
 };
 
-pub(super) fn write(view: RequestView<'_>, streaming: bool, e: &mut Encoder<'_, '_>) -> Result<()> {
+pub(super) fn write(view: RequestView<'_>, egress: &super::request::Egress, e: &mut Encoder<'_, '_>) -> Result<()> {
     let doc = view.document;
     let root = doc.root();
     let x = doc.required(root, "x_ck")?;
@@ -13,9 +13,10 @@ pub(super) fn write(view: RequestView<'_>, streaming: bool, e: &mut Encoder<'_, 
         e.bytes(b",")?;
     }
     messages(view, root, e)?;
+    egress.fill_max_tokens(view, e)?;
     if view.operation == Operation::Generate {
         e.bytes(b",\"stream\":")?;
-        e.bytes(if streaming { b"true" } else { b"false" })?;
+        e.bytes(if egress.upstream_stream { b"true" } else { b"false" })?;
     }
     thinking(doc, x, e)?;
     if let Some(provider) = doc.member(x, "provider_parameters")?

@@ -323,11 +323,12 @@ fn chat_data_uri_image_encodes_a_plain_base64_source() {
         .advance(&mut mapped.writer, &serde_json::to_vec(&body).unwrap())
         .unwrap();
     let ready = ingress
-        .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability)
+        .finish(&mut mapped.writer, &anthropic::request::AnthropicCapability::default())
         .unwrap();
     let wire = anthropic::request::Egress {
         destination: "anthropic",
         upstream_stream: false,
+        default_max_tokens: None,
     }
     .encode(&ready, &mut mapped.writer)
     .unwrap();

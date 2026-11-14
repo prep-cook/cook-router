@@ -192,7 +192,7 @@ fn known_members(context: Context) -> Option<&'static [&'static str]> {
         Context::Custom => Some(&["name", "description", "format", "namespace", "cache_control"]),
         Context::Format => Some(&["type", "grammar"]),
         Context::Grammar => Some(&["syntax", "definition"]),
-        Context::Choice => Some(&["type", "function", "custom"]),
+        Context::Choice => Some(&["type", "function", "custom", "allowed_tools"]),
         Context::ResponseFormat => Some(&["type", "json_schema"]),
         Context::JsonSchema => Some(&["name", "description", "schema", "strict"]),
         Context::Audio => Some(&["voice", "format"]),
