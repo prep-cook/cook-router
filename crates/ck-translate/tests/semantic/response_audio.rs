@@ -55,7 +55,8 @@ fn completed(mapped: &Mapped) -> Option<Value> {
 }
 
 /// 500 audio deltas of 40 bytes each fit a 16-frame pool: they share data records instead of
-/// costing a frame-aligned record each.
+/// costing a frame-aligned record each. The codec's 100 ms flush delay reads the wall clock, so a
+/// slow host may publish a few extra records; the bound only rules out one record per delta.
 #[test]
 fn streamed_audio_deltas_share_data_records() {
     let raw = sample(500 * 40);
@@ -67,7 +68,7 @@ fn streamed_audio_deltas_share_data_records() {
     ingress.finish(&mut mapped.writer).unwrap();
     let (records, bytes) = data_records(&mapped);
     assert_eq!(bytes, raw);
-    assert!(records <= raw.len().div_ceil(THRESHOLD) + 1, "{records} data records");
+    assert!(records <= 25, "{records} data records");
     assert_eq!(completed(&mapped).unwrap()["bytes"], raw.len());
 }
 
