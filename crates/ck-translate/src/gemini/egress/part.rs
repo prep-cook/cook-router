@@ -41,6 +41,7 @@ impl Egress {
             media: None,
             thought,
             held: false,
+            split: false,
         })?;
         Ok(())
     }
@@ -115,6 +116,7 @@ impl Egress {
                 media: None,
                 thought: false,
                 held: false,
+                split: false,
             })?;
         }
         let name = event.required(root, "name")?;
@@ -154,7 +156,38 @@ impl Egress {
         self.tool_args(owner, event)?;
         let x = event.required(event.root(), "x_ck")?;
         if event.member(x, "block_index")?.is_none() {
+            let block = self.block(event)?;
+            self.write_earlier(owner, block, output)?;
             self.block_end(owner, event, output)?;
+        }
+        Ok(())
+    }
+    /// Writes out what the other open parts of `block`'s choice hold, so a call outside any
+    /// block follows the text that preceded it.
+    fn write_earlier(
+        &mut self,
+        owner: &mut Writer,
+        block: usize,
+        output: &mut impl FnMut(ScratchLease) -> Result<()>,
+    ) -> Result<()> {
+        let choice = self.blocks[block].choice;
+        for other in 0..self.blocks.len() {
+            // Another call outside any block is still open and stays whole.
+            if other == block || self.blocks[other].choice != choice || self.blocks[other].arguments.is_some() {
+                continue;
+            }
+            if self.body.is_none() {
+                if self.blocks[other].held {
+                    self.write_part(owner, other, output)?;
+                }
+                continue;
+            }
+            let doc = &self.blocks[other].document;
+            if doc.node(doc.root())?.first.is_some() {
+                let document = std::mem::replace(&mut self.blocks[other].document, empty_part(owner, false)?);
+                self.blocks[other].split = true;
+                self.append_part(choice, document)?;
+            }
         }
         Ok(())
     }
@@ -242,7 +275,19 @@ impl Egress {
             self.blocks.swap_remove(block);
             return Ok(());
         }
-        let Block { choice, document, .. } = self.blocks.swap_remove(block);
+        let Block {
+            choice,
+            document,
+            split,
+            ..
+        } = self.blocks.swap_remove(block);
+        if split && document.node(document.root())?.first.is_none() {
+            return Ok(());
+        }
+        self.append_part(choice, document)
+    }
+    /// Appends a part to the buffered candidate of `choice`.
+    fn append_part(&mut self, choice: u64, document: Document) -> Result<()> {
         let slot = self.choice(choice)?;
         let candidate = self.choices[slot].node.ok_or(Error::Schema)?;
         let body = self.body.as_mut().ok_or(Error::Schema)?;

@@ -61,6 +61,8 @@ struct Block {
     thought: bool,
     /// A streamed part holds its latest text until more text, its signature or its end arrives.
     held: bool,
+    /// A buffered part whose content so far was written ahead of a tool call outside any block.
+    split: bool,
 }
 impl Egress {
     pub fn new(
