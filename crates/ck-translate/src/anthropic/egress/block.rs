@@ -24,7 +24,10 @@ impl Egress {
         }
         let native = if is(&doc, root, "kind", "text")? {
             "text"
-        } else if is(&doc, root, "kind", "thinking")? || is(&doc, root, "kind", "reasoning")? {
+        } else if is(&doc, root, "kind", "thinking")?
+            || is(&doc, root, "kind", "reasoning")?
+            || is(&doc, root, "kind", "reasoning_summary")?
+        {
             "thinking"
         } else if is(&doc, root, "kind", "redacted")? {
             "redacted_thinking"
@@ -54,10 +57,8 @@ impl Egress {
         } else {
             body.set(body_root, "type", Value::Text(native))?;
         }
-        for (k, field) in [("text", "text"), ("thinking", "thinking")] {
-            if native == k {
-                body.set(body_root, field, Value::Fragments)?;
-            }
+        if matches!(native, "text" | "thinking") {
+            body.set(body_root, native, Value::Fragments)?;
         }
         let index = self.blocks.len() as u64;
         self.blocks.push(Block {

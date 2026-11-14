@@ -87,7 +87,9 @@ fn run(source: Source, upstream: BodyMode, input: &[u8], client: Client, mode: B
         }
     };
     let mut egress: Box<dyn Egress> = match client {
-        Client::Anthropic => Box::new(anthropic::egress::Egress::new(&mut m.writer, identity(), op, mode, |_| {}).unwrap()),
+        Client::Anthropic => {
+            Box::new(anthropic::egress::Egress::new(&mut m.writer, identity(), op, mode, |_| {}).unwrap())
+        }
         Client::Chat => {
             Box::new(codec::chat::egress::Egress::new(&mut m.writer, identity(), op, mode, true, |_| {}).unwrap())
         }
@@ -145,7 +147,10 @@ fn accumulate(raw: &[u8]) -> Value {
         match event["type"].as_str().unwrap() {
             "message_start" => message = event["message"].clone(),
             "content_block_start" => {
-                message["content"].as_array_mut().unwrap().push(event["content_block"].clone());
+                message["content"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(event["content_block"].clone());
                 json.push(String::new());
             }
             "content_block_delta" => {
@@ -178,7 +183,13 @@ fn accumulate(raw: &[u8]) -> Value {
 fn streamed_tool_use_with_an_empty_first_fragment_translates() {
     for name in ["a2_tools_t1_stream.sse", "b3_think_stream.sse"] {
         let input = fixture(name);
-        let buffered = run(Source::Anthropic, BodyMode::Streaming, &input, Client::Anthropic, BodyMode::Buffered);
+        let buffered = run(
+            Source::Anthropic,
+            BodyMode::Streaming,
+            &input,
+            Client::Anthropic,
+            BodyMode::Buffered,
+        );
         let text = std::str::from_utf8(&buffered).unwrap();
         assert_eq!(text.matches("\"input\"").count(), 1, "{name}: {text}");
         let buffered: Value = serde_json::from_slice(&buffered).unwrap();
@@ -194,7 +205,13 @@ fn streamed_tool_use_with_an_empty_first_fragment_translates() {
 fn streamed_replay_keeps_the_signature_and_sends_no_empty_delta() {
     for name in ["a2_tools_t1_stream.sse", "b3_think_stream.sse"] {
         let input = fixture(name);
-        let output = run(Source::Anthropic, BodyMode::Streaming, &input, Client::Anthropic, BodyMode::Streaming);
+        let output = run(
+            Source::Anthropic,
+            BodyMode::Streaming,
+            &input,
+            Client::Anthropic,
+            BodyMode::Streaming,
+        );
         assert_eq!(accumulate(&output)["content"], accumulate(&input)["content"], "{name}");
         for event in events(&output) {
             for field in ["text", "thinking", "signature", "partial_json"] {
@@ -227,20 +244,44 @@ fn buffered_body_from_a_stream_writes_finish_members_once() {
         json!({"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal"}},"usage":{"output_tokens":0}}),
         json!({"type":"message_stop"}),
     ];
-    let input: String = rows.iter().map(|r| format!("event: {}\ndata: {r}\n\n", r["type"].as_str().unwrap())).collect();
-    let output = run(Source::Anthropic, BodyMode::Streaming, input.as_bytes(), Client::Anthropic, BodyMode::Buffered);
+    let input: String = rows
+        .iter()
+        .map(|r| format!("event: {}\ndata: {r}\n\n", r["type"].as_str().unwrap()))
+        .collect();
+    let output = run(
+        Source::Anthropic,
+        BodyMode::Streaming,
+        input.as_bytes(),
+        Client::Anthropic,
+        BodyMode::Buffered,
+    );
     let text = std::str::from_utf8(&output).unwrap();
     assert_eq!(text.matches("\"stop_details\"").count(), 1, "{text}");
-    assert_eq!(serde_json::from_str::<Value>(text).unwrap()["stop_details"], json!({"type":"refusal"}));
+    assert_eq!(
+        serde_json::from_str::<Value>(text).unwrap()["stop_details"],
+        json!({"type":"refusal"})
+    );
 }
 
 #[test]
 fn chat_message_from_a_buffered_anthropic_body_has_a_role() {
     let input = fixture("a1b_chat_nonstream.json");
-    let buffered = run(Source::Anthropic, BodyMode::Buffered, &input, Client::Chat, BodyMode::Buffered);
+    let buffered = run(
+        Source::Anthropic,
+        BodyMode::Buffered,
+        &input,
+        Client::Chat,
+        BodyMode::Buffered,
+    );
     let buffered: Value = serde_json::from_slice(&buffered).unwrap();
     assert_eq!(buffered["choices"][0]["message"]["role"], "assistant", "{buffered}");
-    let streamed = run(Source::Anthropic, BodyMode::Buffered, &input, Client::Chat, BodyMode::Streaming);
+    let streamed = run(
+        Source::Anthropic,
+        BodyMode::Buffered,
+        &input,
+        Client::Chat,
+        BodyMode::Streaming,
+    );
     let first = &events(&streamed)[0];
     assert_eq!(first["choices"][0]["delta"]["role"], "assistant", "{first}");
 }
@@ -248,10 +289,30 @@ fn chat_message_from_a_buffered_anthropic_body_has_a_role() {
 #[test]
 fn chat_usage_uses_chat_count_names_with_reasoning_and_cache_details() {
     for (source, upstream, name, (prompt, completion, reasoning)) in [
-        (Source::Anthropic, BodyMode::Buffered, "b3_think_nonstream.json", (447, 361, 229)),
-        (Source::Anthropic, BodyMode::Streaming, "b3_think_stream.sse", (447, 117, 42)),
-        (Source::Responses, BodyMode::Streaming, "relay-medium-resp-reason1.sse", (30, 191, 183)),
-        (Source::Responses, BodyMode::Buffered, "relay-chat2resp.json", (19, 11, 0)),
+        (
+            Source::Anthropic,
+            BodyMode::Buffered,
+            "b3_think_nonstream.json",
+            (447, 361, 229),
+        ),
+        (
+            Source::Anthropic,
+            BodyMode::Streaming,
+            "b3_think_stream.sse",
+            (447, 117, 42),
+        ),
+        (
+            Source::Responses,
+            BodyMode::Streaming,
+            "relay-medium-resp-reason1.sse",
+            (30, 191, 183),
+        ),
+        (
+            Source::Responses,
+            BodyMode::Buffered,
+            "relay-chat2resp.json",
+            (19, 11, 0),
+        ),
     ] {
         let output = run(source, upstream, &fixture(name), Client::Chat, BodyMode::Buffered);
         let usage = &serde_json::from_slice::<Value>(&output).unwrap()["usage"];
@@ -259,8 +320,16 @@ fn chat_usage_uses_chat_count_names_with_reasoning_and_cache_details() {
         assert_eq!(usage["completion_tokens"], completion, "{name}: {usage}");
         assert_eq!(usage["total_tokens"], prompt + completion, "{name}: {usage}");
         assert_eq!(usage["prompt_tokens_details"]["cached_tokens"], 0, "{name}: {usage}");
-        assert_eq!(usage["completion_tokens_details"]["reasoning_tokens"], reasoning, "{name}: {usage}");
-        for native in ["input_tokens", "output_tokens", "input_tokens_details", "output_tokens_details"] {
+        assert_eq!(
+            usage["completion_tokens_details"]["reasoning_tokens"], reasoning,
+            "{name}: {usage}"
+        );
+        for native in [
+            "input_tokens",
+            "output_tokens",
+            "input_tokens_details",
+            "output_tokens_details",
+        ] {
             assert!(usage.get(native).is_none(), "{name}: {usage}");
         }
     }
@@ -313,3 +382,31 @@ fn anthropic_input_tokens_count_an_unreported_cache_write_as_zero() {
     assert_eq!(usage["input_tokens"], 10, "{usage}");
 }
 
+#[test]
+fn responses_reasoning_summary_becomes_a_thinking_block() {
+    let input = fixture("relay-medium-resp-reason1.sse");
+    let buffered = run(
+        Source::Responses,
+        BodyMode::Streaming,
+        &input,
+        Client::Anthropic,
+        BodyMode::Buffered,
+    );
+    let buffered: Value = serde_json::from_slice(&buffered).unwrap();
+    let streamed = run(
+        Source::Responses,
+        BodyMode::Streaming,
+        &input,
+        Client::Anthropic,
+        BodyMode::Streaming,
+    );
+    for content in [&buffered["content"], &accumulate(&streamed)["content"]] {
+        let blocks = content.as_array().unwrap();
+        assert!(blocks.iter().all(|b| b["type"] != "opaque"), "{content}");
+        assert_eq!(blocks[0]["type"], "thinking", "{content}");
+        assert!(
+            blocks[0]["thinking"].as_str().unwrap().contains("Verifying"),
+            "{content}"
+        );
+    }
+}
