@@ -32,10 +32,11 @@ fn members(doc: &Document, parent: usize, skip: &[&str], e: &mut Encoder<'_, '_>
     }
     Ok(())
 }
-/// Writes the Gemini source marker and `original` entries for the unknown members of `parent`.
-fn provenance(doc: &Document, parent: usize, known: &[&str], e: &mut Encoder<'_, '_>) -> Result<()> {
+/// Writes the Gemini source marker and `original` entries for the unknown members of each
+/// `(parent, pointer prefix, known names)` group.
+fn provenance(doc: &Document, groups: &[(usize, &str, &[&str])], e: &mut Encoder<'_, '_>) -> Result<()> {
     e.bytes(b",\"source\":{\"protocol\":\"gemini\"}")?;
-    crate::boundary::original(doc, "gemini", &[(parent, "", known)], e)
+    crate::boundary::original(doc, "gemini", groups, e)
 }
 fn object(doc: &Document, node: usize) -> Result<()> {
     if matches!(doc.node(node)?.value, Value::Object) {

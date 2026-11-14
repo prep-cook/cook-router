@@ -20,6 +20,9 @@ const PART_KNOWN: &[&str] = &[
     "executableCode",
     "codeExecutionResult",
 ];
+/// Call and inline-data members with a canonical carrier; the rest stay as nested provenance.
+const CALL_KNOWN: &[&str] = &["id", "name", "args"];
+const INLINE_KNOWN: &[&str] = &["mimeType", "data"];
 
 impl State {
     pub(super) fn part(&mut self, owner: &mut Writer, doc: &Document, part: usize, slot: usize) -> Result<()> {
@@ -58,6 +61,17 @@ impl State {
             |e| e.bytes(b",\"kind\":\"message\",\"role\":\"assistant\""),
             |_| Ok(()),
         )?;
+        let mut groups = [(part, "", PART_KNOWN); 3];
+        let mut count = 1;
+        for (name, pointer, known) in [
+            ("functionCall", "/functionCall", CALL_KNOWN),
+            ("inlineData", "/inlineData", INLINE_KNOWN),
+        ] {
+            if let Some(n) = doc.member(part, name)? {
+                groups[count] = (n, pointer, known);
+                count += 1;
+            }
+        }
         self.emitter.emit(
             owner,
             Kind::BlockStart,
@@ -66,7 +80,7 @@ impl State {
                 e.bytes(b",\"kind\":")?;
                 e.string(kind)
             },
-            |e| super::super::provenance(doc, part, PART_KNOWN, e),
+            |e| super::super::provenance(doc, &groups[..count], e),
         )?;
         self.payload(owner, doc, part, scope, (slot, item), reasoning)?;
         if let Some(signature) = doc.member(part, "thoughtSignature")? {

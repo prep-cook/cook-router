@@ -443,13 +443,21 @@ fn fields(doc: &Document, parent: usize, skip: &[&str], first: &mut bool, e: &mu
 fn candidate(e: &mut Encoder<'_, '_>, index: u64, part: Option<&Document>, members: Option<&Document>) -> Result<()> {
     e.bytes(b"{\"index\":")?;
     e.unsigned(index)?;
-    if let Some(part) = part {
-        e.bytes(b",\"content\":{\"role\":\"model\",\"parts\":[")?;
-        part.write(part.root(), e)?;
-        e.bytes(b"]}")?;
+    let content = members.map(|m| m.member(m.root(), "content")).transpose()?.flatten();
+    if part.is_some() || content.is_some() {
+        e.bytes(b",\"content\":{\"role\":\"model\"")?;
+        if let Some(part) = part {
+            e.bytes(b",\"parts\":[")?;
+            part.write(part.root(), e)?;
+            e.bytes(b"]")?;
+        }
+        if let (Some(members), Some(content)) = (members, content) {
+            fields(members, content, &[], &mut false, e)?;
+        }
+        e.bytes(b"}")?;
     }
     if let Some(members) = members {
-        fields(members, members.root(), &[], &mut false, e)?;
+        fields(members, members.root(), &["content"], &mut false, e)?;
     }
     e.bytes(b"}")
 }

@@ -114,9 +114,7 @@ impl Egress {
         let block = self.block(&event)?;
         let entry = &mut self.blocks[block];
         let doc = &mut entry.document;
-        let part = doc.root();
-        doc.remove(part, "functionCall")?;
-        let call = doc.set(part, "functionCall", Value::Object)?;
+        let call = container(doc, "functionCall")?;
         let offset = absorb(doc, event)?;
         take(doc, offset, name, call, "name")?;
         if let Some(id) = id {
@@ -177,9 +175,7 @@ impl Egress {
         let block = self.block(&event)?;
         let entry = &mut self.blocks[block];
         let doc = &mut entry.document;
-        let part = doc.root();
-        doc.remove(part, "inlineData")?;
-        let inline = doc.set(part, "inlineData", Value::Object)?;
+        let inline = container(doc, "inlineData")?;
         if let Some(mime) = mime {
             let offset = absorb(doc, event)?;
             take(doc, offset, mime, inline, "mimeType")?;
@@ -239,6 +235,14 @@ impl Egress {
         Ok(())
     }
 }
+/// The part's object member `name`, added when absent.
+fn container(doc: &mut Document, name: &'static str) -> Result<usize> {
+    let part = doc.root();
+    match doc.member(part, name)? {
+        Some(node) => Ok(node),
+        None => doc.set(part, name, Value::Object),
+    }
+}
 fn empty_part(owner: &mut Writer, thought: bool) -> Result<Document> {
     mapped(owner, |e| e.bytes(if thought { b"{\"thought\":true}" } else { b"{}" }))
 }
@@ -281,14 +285,25 @@ fn restore_originals(doc: &mut Document, event: Document) -> Result<()> {
             return Err(Error::Schema);
         };
         let name = Name::Pointer(text);
+        // A nested pointer names a member of the part's call or inline data.
+        let mut parent = part;
+        for (prefix, member) in [("/functionCall/", "functionCall"), ("/inlineData/", "inlineData")] {
+            let mut chars = doc.chars(doc.required(entry, "pointer")?)?;
+            if prefix
+                .chars()
+                .try_fold(true, |yes, p| Ok::<_, Error>(yes && chars.next_scalar()? == Some(p)))?
+            {
+                parent = container(doc, member)?;
+            }
+        }
         let mut present = false;
-        for member in doc.children(part)? {
+        for member in doc.children(parent)? {
             present |= doc.names_equal(name, doc.node(member)?.name.ok_or(Error::Schema)?)?;
         }
         if !present {
             let node = doc.add(Some(name), Value::Null)?;
             doc.transplant(node, doc.required(entry, "value")?)?;
-            doc.append(part, node)?;
+            doc.append(parent, node)?;
         }
     }
     Ok(())

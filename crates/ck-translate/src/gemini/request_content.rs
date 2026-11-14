@@ -90,6 +90,23 @@ fn normalize_part(owner: &mut Writer, doc: &mut Document, part: usize, place: Pl
     if payloads > 1 {
         return Err(Error::Schema);
     }
+    // Wire members named like canonical part members stay originals before normalization
+    // writes those names.
+    for key in [
+        "type",
+        "source",
+        "mime",
+        "timing",
+        "protocol",
+        "value",
+        "id",
+        "tool_call_id",
+        "result",
+    ] {
+        if let Some(n) = doc.remove(part, key)? {
+            preserve(owner, doc, part, n, None)?;
+        }
+    }
     if let Some(signature) = doc.remove(part, "thoughtSignature")? {
         replay(doc, part, signature, place)?;
     }

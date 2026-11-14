@@ -323,7 +323,8 @@ impl State {
         Ok(())
     }
     /// Publishes the members of a response or candidate (`choice`) that have no canonical
-    /// record, when there are any, as one opaque record.
+    /// record, when there are any, as one opaque record; a candidate's unknown `content`
+    /// members travel as its `content` member.
     fn extras(
         &mut self,
         owner: &mut Writer,
@@ -332,14 +333,15 @@ impl State {
         choice: Option<u64>,
         known: &[&str],
     ) -> Result<()> {
-        let mut extra = false;
-        for node in doc.children(parent)? {
-            let name = doc.node(node)?.name.ok_or(Error::Schema)?;
-            extra |= !known
-                .iter()
-                .try_fold(false, |found, key| Ok::<_, Error>(found || doc.name_is(name, key)?))?;
-        }
-        if !extra {
+        let content = match choice {
+            Some(_) => doc.member(parent, "content")?,
+            None => None,
+        };
+        let content = match content {
+            Some(n) if unknown(doc, n, &["role", "parts"])? => Some(n),
+            _ => None,
+        };
+        if content.is_none() && !unknown(doc, parent, known)? {
             return Ok(());
         }
         let scope = Scope {
@@ -360,6 +362,24 @@ impl State {
                     None => e.bytes(b"\"gemini.response\",\"value\":{\"candidates\":[]")?,
                 }
                 super::super::members(doc, parent, known, e)?;
+                if let Some(content) = content {
+                    e.bytes(b",\"content\":{")?;
+                    let mut first = true;
+                    for n in doc.children(content)? {
+                        let name = doc.node(n)?.name.ok_or(Error::Schema)?;
+                        if !doc.name_is(name, "role")? && !doc.name_is(name, "parts")? {
+                            e.bytes(if std::mem::replace(&mut first, false) {
+                                b""
+                            } else {
+                                b","
+                            })?;
+                            doc.write_name(name, e)?;
+                            e.bytes(b":")?;
+                            doc.write(n, e)?;
+                        }
+                    }
+                    e.bytes(b"}")?;
+                }
                 e.bytes(b"}")
             },
             |e| e.bytes(b",\"source\":{\"protocol\":\"gemini\"}"),
@@ -397,6 +417,19 @@ impl State {
     }
 }
 
+/// Whether `parent` has a member not named in `known`.
+fn unknown(doc: &Document, parent: usize, known: &[&str]) -> Result<bool> {
+    for node in doc.children(parent)? {
+        let name = doc.node(node)?.name.ok_or(Error::Schema)?;
+        if !known
+            .iter()
+            .try_fold(false, |found, key| Ok::<_, Error>(found || doc.name_is(name, key)?))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 /// Unix seconds of a protobuf JSON `Timestamp`: `YYYY-MM-DDThh:mm:ss[.frac]` then `Z` or
 /// `±hh:mm`. Another spelling or a time before 1970 has none.
 /// ponytail: repeats crate::common::parse_rfc3339_unix without its day-of-month check, because

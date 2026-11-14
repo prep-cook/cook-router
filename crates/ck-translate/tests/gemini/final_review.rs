@@ -248,7 +248,7 @@ fn native_sse_metadata_and_unknown_events_stay_opaque() {
     let body = json!({"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]});
     let unknown = "event: future_event\ndata: plain text\ndata: {\"x\":1}\n\n";
     let mut wire = format!("{unknown}id: ev1\nretry: 1500\nevent: message\n").into_bytes();
-    wire.extend(sse(&[body.clone()]));
+    wire.extend(sse(std::slice::from_ref(&body)));
     wire.extend(unknown.as_bytes());
     let (out, _) = response(&wire, Framing::Sse, Framing::Sse, Operation::Generate);
     let raw = String::from_utf8(out.clone()).unwrap();
@@ -265,4 +265,41 @@ fn native_sse_metadata_and_unknown_events_stay_opaque() {
         serde_json::from_slice::<Value>(&again).unwrap()["candidates"][0]["finishReason"],
         "STOP"
     );
+}
+
+/// Unknown members inside known response containers, and request part members whose names
+/// collide with canonical ones, return to Gemini unchanged.
+#[test]
+fn nested_unknown_members_survive() {
+    let body = json!({"candidates":[{"index":0,"content":{"role":"model","parts":[
+        {"functionCall":{"name":"f","args":{},"futureCall":18}},
+        {"inlineData":{"mimeType":"image/png","data":"AAAA","futureInline":19}}
+    ],"futureContent":17},"finishReason":"STOP"}]});
+    for upstream in [Framing::Json, Framing::Sse] {
+        let input = match upstream {
+            Framing::Json => serde_json::to_vec(&body).unwrap(),
+            _ => sse(std::slice::from_ref(&body)),
+        };
+        let (out, _) = response(&input, upstream, Framing::Json, Operation::Generate);
+        assert_eq!(serde_json::from_slice::<Value>(&out).unwrap(), body);
+        let (out, _) = response(&input, upstream, Framing::Sse, Operation::Generate);
+        let rows = events(&out);
+        let candidates: Vec<_> = rows.iter().map(|v| &v["candidates"][0]).collect();
+        assert!(
+            candidates.iter().any(|c| c["content"]["futureContent"] == 17),
+            "{rows:?}"
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c["content"]["parts"][0]["functionCall"]["futureCall"] == 18)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c["content"]["parts"][0]["inlineData"]["futureInline"] == 19)
+        );
+    }
+    let input = json!({"contents":[{"role":"user","parts":[{"text":"hi","type":"vendor","source":1},{"functionCall":{"name":"f","args":{}},"type":"x"}]}]});
+    assert_eq!(request(&input, Operation::Generate).0, input);
 }

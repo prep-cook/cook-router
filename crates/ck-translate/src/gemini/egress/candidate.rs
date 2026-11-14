@@ -252,14 +252,15 @@ impl Egress {
             {
                 continue;
             }
-            for old in body.children(parent)? {
-                if body.names_equal(name, body.node(old)?.name.ok_or(Error::Schema)?)? {
-                    body.detach(parent, old)?;
-                    break;
+            // A candidate's content extras join its content rather than replace it.
+            if target.is_some() && body.name_is(name, "content")? {
+                let content = body.required(parent, "content")?;
+                while let Some(child) = body.node(node)?.first {
+                    replace(body, node, content, child)?;
                 }
+                continue;
             }
-            body.detach(copy, node)?;
-            body.append(parent, node)?;
+            replace(body, copy, parent, node)?;
         }
         Ok(())
     }
@@ -306,6 +307,18 @@ fn line(doc: &Document, node: usize, e: &mut Encoder<'_, '_>) -> Result<()> {
         e.bytes(c.encode_utf8(&mut [0; 4]).as_bytes())?;
     }
     Ok(())
+}
+/// Moves member `node` of `from` to `parent`, replacing a member of the same name.
+fn replace(body: &mut Document, from: usize, parent: usize, node: usize) -> Result<()> {
+    let name = body.node(node)?.name.ok_or(Error::Schema)?;
+    for old in body.children(parent)? {
+        if body.names_equal(name, body.node(old)?.name.ok_or(Error::Schema)?)? {
+            body.detach(parent, old)?;
+            break;
+        }
+    }
+    body.detach(from, node)?;
+    body.append(parent, node)
 }
 /// Member `name` of `parent` unless it is absent or null.
 fn present(doc: &Document, parent: usize, name: &str) -> Result<Option<usize>> {
