@@ -266,6 +266,18 @@ impl State {
             if !matches!(doc.node(content)?.value, Value::Array) {
                 return Err(Error::Schema);
             }
+            // Chat egress takes the message role from this chunk, as from `message_start`.
+            let base = self.base.as_ref().ok_or(Error::Schema)?;
+            self.emitter.emit(
+                owner,
+                Kind::Chunk,
+                self.scope()?,
+                |e| {
+                    base_fields(base, e)?;
+                    e.bytes(b",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]")
+                },
+                |_| Ok(()),
+            )?;
             for (index, block) in doc.children(content)?.enumerate() {
                 self.block_start(owner, doc, block, index as u64, true, None)?;
                 self.block_stop(owner, index as u64, None)?;

@@ -234,3 +234,14 @@ fn buffered_body_from_a_stream_writes_finish_members_once() {
     assert_eq!(serde_json::from_str::<Value>(text).unwrap()["stop_details"], json!({"type":"refusal"}));
 }
 
+#[test]
+fn chat_message_from_a_buffered_anthropic_body_has_a_role() {
+    let input = fixture("a1b_chat_nonstream.json");
+    let buffered = run(Source::Anthropic, BodyMode::Buffered, &input, Client::Chat, BodyMode::Buffered);
+    let buffered: Value = serde_json::from_slice(&buffered).unwrap();
+    assert_eq!(buffered["choices"][0]["message"]["role"], "assistant", "{buffered}");
+    let streamed = run(Source::Anthropic, BodyMode::Buffered, &input, Client::Chat, BodyMode::Streaming);
+    let first = &events(&streamed)[0];
+    assert_eq!(first["choices"][0]["delta"]["role"], "assistant", "{first}");
+}
+
