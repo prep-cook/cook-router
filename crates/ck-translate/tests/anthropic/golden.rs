@@ -78,18 +78,21 @@ fn recorded_request_inputs_preserve_semantics_or_fail_the_source_schema() {
                 .unwrap();
                 let error = match ingress.advance(&mut mapped.writer, &raw) {
                     Err(error) => error,
-                    Ok(()) => match ingress.finish(&mut mapped.writer, &anthropic::request::AnthropicCapability) {
-                        Err(error) => error,
-                        Ok(ready) => {
-                            let output = anthropic::request::Egress {
-                                destination: "anthropic",
-                                upstream_stream: true,
+                    Ok(()) => {
+                        match ingress.finish(&mut mapped.writer, &anthropic::request::AnthropicCapability::default()) {
+                            Err(error) => error,
+                            Ok(ready) => {
+                                let output = anthropic::request::Egress {
+                                    destination: "anthropic",
+                                    upstream_stream: true,
+                                    default_max_tokens: None,
+                                }
+                                .encode(&ready, &mut mapped.writer)
+                                .unwrap();
+                                panic!("{id}: invalid source authorized upstream bytes {:?}", bytes(&output));
                             }
-                            .encode(&ready, &mut mapped.writer)
-                            .unwrap();
-                            panic!("{id}: invalid source authorized upstream bytes {:?}", bytes(&output));
                         }
-                    },
+                    }
                 };
                 assert!(
                     !matches!(error, codec::Error::Storage(_)),
