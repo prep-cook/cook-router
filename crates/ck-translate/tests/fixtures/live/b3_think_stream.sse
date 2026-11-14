@@ -1,0 +1,84 @@
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-5-5","id":"msg_011Ch3JceV2XyJjsaXAVe2Sa","type":"message","role":"assistant","content":[],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":447,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":8,"service_tier":"standard","inference_geo":"global","speed":"standard"},"diagnostics":null}      }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}               }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The"} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" letter after E is F,"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" which points"}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to France"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" as the European country,"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" with Paris as its capital"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"."}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" Next I'll"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" call the weather l"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ookup for Paris, requ"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"esting celsius."}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\n"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"CAQS0AUKEAgTGAI4AUIIdGhpbmtpbmcSDBd1yHJZblQQy+39UxoMhq8+j5Wc4TThyi5iIjAnh6dbGOS/rUfxbvi6WfTKsY40pn7pwugRZCm65lfEYVX4r3g6eFtCBYjZADN7XEwq7QRUS2wPy7YsCugeaGuBUDHIu1guL/ZXWRJlKTiKKlaJ3ctAIYWA2gvnZiCgISkDv36xWMXXeubW67RVxO512Fg6LPJF8vuWQqyXfP1XRnCdhIZ+lfv1QFqLVONqze6bpc7VPRW4ANmtJtnSHEqXfjlznyWucDj4yB0+x80CdsutOFiRnTRB7wc+pIx1zm7YmgB+Lc2U5IZ1Xia79G8Ckk4rdifpWI9zLLHU+plge0HZafbo7ufSfX1AbI7y2FgJQXo+OlTZ6WkHPTHc50Ml4d7CpCHoDv+x5P/ix5u/Ewi6ReehQxAcdlqZkoR1m2MZ3jKfCWRt0OYqjjI5QVjoI695Qa3rKSokRsjfXcB4FARyUtV1w6qLmpKoLhmFuX+ClH73cyieuD5K4W9RM8pLtl+vGO45jheq9DuNm8ZcdeWrmWM6yPVep2hXW3WUin8e6Y4zeWcosb+4KIwstY5nNt8cLc4XZaFj8WysbtcW0zsfXDEe2nSORXglBzgYYjzA63sf0QbsE9Ys5QFlKk705BMqs2kPc0o+e4uVfetBtjtL8qjdjSbbQqmisxWRUazb2NH2OcZ26KTLZJodoP5z4HLpcHH3QF43wQiqyr3kQX4GYnt5q5pNpxW72NHsqRO/O2PM3zUo0qgscrAA9kMF4UzgO/0EbQZ1+2tUmWnx+Rq5vk1hT6QvGac2mhKstyl7CrCOCW9yXCrzuGk26BL0Oeor9DMNGbQ2dNdACeS5hc4T0PFACTsW1R1sghj8tOlvN43+CtpX3ChTdF+Lut4hvTakzu4viwEmOftcCau6MxHtFCDqj+MgJ0nHxj0gPq8YAQ=="}         }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0         }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01BpWPGn88Q7KuMoSsj3warH","name":"get_weather","input":{},"caller":{"type":"direct"}}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":""}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\""}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":": \"Pari"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"s\""} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":", \"unit"}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\": \"cel"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"sius\"}"}            }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1     }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null,"stop_details":null,"container":null},"usage":{"input_tokens":447,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":117,"output_tokens_details":{"thinking_tokens":42}}  }
+
+event: message_stop
+data: {"type":"message_stop"            }
+

@@ -122,6 +122,10 @@ impl Egress {
         if !is(body, from, "arguments_format", "json")? {
             return Err(Error::Unsupported);
         }
+        // Native blocks start with an empty input; `tool_end` replaces it with the parsed JSON.
+        if body.member(body.root(), "input")?.is_none() {
+            body.set(body.root(), "input", Value::Object)?;
+        }
         self.start_block(owner, index, output)?;
         Ok(())
     }
@@ -244,6 +248,7 @@ impl Egress {
                 Ok(())
             })?;
             let input = body.import_json(owner, raw)?;
+            body.remove(body.root(), "input")?;
             body.rename(input, "input")?;
             body.append(body.root(), input)?;
         }
@@ -451,7 +456,8 @@ impl Egress {
         string(doc, value)?;
         self.start_block(owner, index, output)?;
         let block = &mut self.blocks[index];
-        if self.mode == BodyMode::Streaming {
+        // An empty `signature_delta` would replace the signature in SDK accumulators.
+        if self.mode == BodyMode::Streaming && !doc.string_is(value, "")? {
             output(native_event(owner, "content_block_delta", Some(doc), |e| {
                 e.bytes(b",\"index\":")?;
                 e.unsigned(block.index)?;
